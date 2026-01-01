@@ -1286,7 +1286,7 @@ L<https://metacpan.org/dist/DBIx-Class-Async/>
 
 =head1 LICENSE AND COPYRIGHT
 
-Copyright (C) 2025 Mohammad Sajid Anwar.
+Copyright (C) 2026 Mohammad Sajid Anwar.
 
 This program  is  free software; you can redistribute it and / or modify it under
 the  terms  of the the Artistic License (2.0). You may obtain a  copy of the full
