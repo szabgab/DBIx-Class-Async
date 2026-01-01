@@ -724,10 +724,42 @@ Executes a transaction.
         $schema->resultset('Account')->find(2)->update({ balance => \'balance + 100' });
 
         return 'transfer_complete';
-    });
+    })->get;
 
 The callback receives a DBIx::Class::Schema instance and should return the
 transaction result.
+
+B<IMPORTANT:> This method has limitations due to serialisation constraints.
+The CODE reference passed to C<txn_do> must be serialisable by L<Sereal>,
+which may not support anonymous subroutines or CODE references with closed
+over variables in all configurations.
+
+If you encounter serialisation errors, consider:
+
+=over 4
+
+=item * Using named subroutines instead of anonymous ones
+
+=item * Recompiling L<Sereal> with C<ENABLE_SRL_CODEREF> support
+
+=item * Using individual async operations instead of transactions
+
+=item * Using the C<txn_batch> method for predefined operations
+
+=back
+
+Common error: C<Found type 13 CODE(...), but it is not representable by the
+Sereal encoding format>
+
+This indicates that your Sereal installation does not support CODE reference
+serialization. You may need to recompile Sereal with:
+
+    perl Makefile.PL --enable-srl-coderef
+    make
+    make install
+
+Alternatively, structure your code to avoid passing CODE references through
+worker boundaries.
 
 =cut
 
@@ -746,7 +778,128 @@ sub txn_do {
 
     my $start_time = time;
 
+    # Try to pass the CODE ref directly - this might fail with Sereal
+    # but let the error propagate naturally
     return $self->_call_worker('txn_do', $code)->then(sub {
+        my ($result) = @_;
+        my $duration = time - $start_time;
+        $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
+        return Future->done($result);
+    })->catch(sub {
+        my $error = shift;
+        # If it fails due to serialization, provide a better error message
+        if ($error =~ /not representable by the Sereal encoding format/) {
+            return Future->fail(
+                "txn_do cannot serialise CODE references through IO::Async workers. " .
+                "Consider using individual async methods or a different approach."
+            );
+        }
+        return Future->fail($error);
+    });
+}
+
+=head2 txn_batch
+
+Executes a batch of operations within a transaction. This is the recommended
+alternative to C<txn_do> as it avoids CODE reference serialisation issues.
+
+    my $result = $async_db->txn_batch(
+        # Update operations
+        { type => 'update', resultset => 'Account', id => 1,
+          data => { balance => \'balance - 100' } },
+        { type => 'update', resultset => 'Account', id => 2,
+          data => { balance => \'balance + 100' } },
+
+        # Create operation
+        { type => 'create', resultset => 'Log',
+          data => { event => 'transfer', amount => 100, timestamp => \'NOW()' } },
+    )->get;
+
+    # Returns count of successful operations
+    say "Executed $result operations in transaction";
+
+Supported operation types:
+
+=over 4
+
+=item * B<update> - Update an existing record
+
+    {
+        type      => 'update',
+        resultset => 'User',       # ResultSet name
+        id        => 123,          # Primary key value
+        data      => { name => 'New Name', status => 'active' }
+    }
+
+=item * B<create> - Create a new record
+
+    {
+        type      => 'create',
+        resultset => 'Order',
+        data      => { user_id => 1, amount => 99.99, status => 'pending' }
+    }
+
+=item * B<delete> - Delete a record
+
+    {
+        type      => 'delete',
+        resultset => 'Session',
+        id        => 456
+    }
+
+=item * B<raw> - Execute raw SQL (use with caution)
+
+    {
+        type => 'raw',
+        sql  => 'UPDATE accounts SET balance = balance - ? WHERE id = ?',
+        bind => [100, 1]
+    }
+
+=back
+
+All operations succeed or fail together. If any operation fails, the entire
+transaction is rolled back.
+
+Returns: Number of successfully executed operations.
+
+=cut
+
+sub txn_batch {
+    my ($self, @operations) = @_;
+
+    # Validate operations
+    for my $op (@operations) {
+        unless (ref $op eq 'HASH' && $op->{type}) {
+            croak "Each operation must be a hashref with 'type' key";
+        }
+
+        if ($op->{type} eq 'update' || $op->{type} eq 'delete') {
+            croak "Operation type '$op->{type}' requires 'id' parameter"
+                unless exists $op->{id};
+        }
+
+        if ($op->{type} eq 'update' || $op->{type} eq 'create') {
+            croak "Operation type '$op->{type}' requires 'data' parameter"
+                unless ref $op->{data} eq 'HASH';
+        }
+
+        if ($op->{type} eq 'raw') {
+            croak "Operation type 'raw' requires 'sql' parameter"
+                unless $op->{sql};
+        }
+    }
+
+    $self->{stats}{queries}++;
+    $self->_record_metric('inc', 'db_async_queries_total');
+
+    # Invalidate all cache for safety
+    if (defined $self->{cache_ttl} && $self->{cache_ttl} > 0) {
+        $self->{cache}->clear;
+    }
+
+    my $start_time = time;
+
+    return $self->_call_worker('txn_batch', \@operations)->then(sub {
         my ($result) = @_;
         my $duration = time - $start_time;
         $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
@@ -927,14 +1080,18 @@ sub disconnect {
 
     # Stop all workers
     for my $worker (@{$self->{workers}}) {
-        $self->{loop}->remove($worker->{instance});
+        if (defined $worker->{instance}) {
+            $self->{loop}->remove($worker->{instance});
+        }
     }
 
     $self->{workers} = [];
     $self->{is_connected} = 0;
 
     # Clear cache
-    $self->{cache}->clear;
+    if (defined $self->{cache}) {
+        $self->{cache}->clear;
+    }
 }
 
 =head2 loop
@@ -1024,6 +1181,44 @@ sub _execute_operation {
     elsif ($operation eq 'txn_do') {
         my ($code) = @args;
         return $schema->txn_do($code);
+    }
+    elsif ($operation eq 'txn_batch') {
+        my ($operations) = @args;
+
+        return $schema->txn_do(sub {
+            my $success_count = 0;
+
+            foreach my $op (@$operations) {
+                if ($op->{type} eq 'update') {
+                    my $row = $schema->resultset($op->{resultset})->find($op->{id});
+                    croak "Record not found for update: $op->{resultset} ID $op->{id}"
+                        unless $row;
+                    $row->update($op->{data});
+                    $success_count++;
+                }
+                elsif ($op->{type} eq 'create') {
+                    $schema->resultset($op->{resultset})->create($op->{data});
+                    $success_count++;
+                }
+                elsif ($op->{type} eq 'delete') {
+                    my $row = $schema->resultset($op->{resultset})->find($op->{id});
+                    croak "Record not found for delete: $op->{resultset} ID $op->{id}"
+                        unless $row;
+                    $row->delete;
+                    $success_count++;
+                }
+                elsif ($op->{type} eq 'raw') {
+                    my $sth = $schema->storage->dbh->prepare($op->{sql});
+                    $sth->execute(@{$op->{bind} || []});
+                    $success_count++;
+                }
+                else {
+                    croak "Unknown operation type: $op->{type}";
+                }
+            }
+
+            return $success_count;
+        });
     }
     elsif ($operation eq 'search_with_prefetch') {
         my ($resultset, $search_args, $prefetch, $attrs) = @args;
