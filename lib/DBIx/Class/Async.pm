@@ -37,6 +37,12 @@ use constant {
     HEALTH_CHECK_INTERVAL => 300,
 };
 
+=head1 DISCLAIMER
+
+B<This is pure experimental currently.>
+
+You are encouraged to try and share your suggestions.
+
 =head1 SYNOPSIS
 
     use IO::Async::Loop;
@@ -57,7 +63,6 @@ use constant {
         loop      => $loop,
     );
 
-    # Simple search
     my $f = $db->search('User', { active => 1 });
 
     $f->on_done(sub {
@@ -65,10 +70,12 @@ use constant {
         for my $row (@$rows) {
             say $row->{name};
         }
+        $loop->stop;
     });
 
     $f->on_fail(sub {
         warn "Query failed: @_";
+        $loop->stop;
     });
 
     $loop->run;
@@ -1024,7 +1031,7 @@ sub _execute_operation {
         $attrs->{prefetch} = $prefetch;
 
         my $rs = $schema->resultset($resultset)->search($search_args || {}, $attrs);
-        return [ map { _inflate_row_with_prefetch($_) } $rs->all ];
+        return [ map { _inflate_row_with_prefetch($_, $prefetch) } $rs->all ];
     }
     elsif ($operation eq 'health_check') {
         # Simple health check query
@@ -1040,18 +1047,33 @@ sub _execute_operation {
 }
 
 sub _inflate_row_with_prefetch {
-    my ($row) = @_;
+    my ($row, $prefetch) = @_;
 
     my $result = {$row->get_columns};
 
-    # Add prefetched relationships
-    my @prefetched = $row->relationship_accessors;
-    for my $rel_name (@prefetched) {
-        my $related = $row->$rel_name;
-        if (ref $related eq 'ARRAY') {
-            $result->{$rel_name} = [ map { {$_->get_columns} } @$related ];
-        } elsif ($related) {
-            $result->{$rel_name} = {$related->get_columns};
+    # Handle both single relationship and array of relationships
+    my @rel_names = ref $prefetch eq 'ARRAY' ? @$prefetch : ($prefetch);
+
+    foreach my $rel_name (@rel_names) {
+        # Check if prefetched data exists in related_resultsets
+        if (my $related_resultsets = $row->{related_resultsets}) {
+            if (my $prefetched_data = $related_resultsets->{$rel_name}) {
+                # If it has an all() method (ResultSet), call it to get rows
+                if (ref $prefetched_data && $prefetched_data->can('all')) {
+                    my @related_rows = $prefetched_data->all;
+                    if (@related_rows) {
+                        $result->{$rel_name} = [ map { {$_->get_columns} } @related_rows ];
+                    }
+                }
+                # Already have rows (arrayref)
+                elsif (ref $prefetched_data eq 'ARRAY') {
+                    $result->{$rel_name} = [ map { {$_->get_columns} } @$prefetched_data ];
+                }
+                # Single row object
+                elsif (ref $prefetched_data) {
+                    $result->{$rel_name} = {$prefetched_data->get_columns};
+                }
+            }
         }
     }
 
