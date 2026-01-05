@@ -1,5 +1,8 @@
 Revision history for DBIx::Class::Async
 
+0.09  2026-01-05
+      - Added support for Cursor.
+
 0.08  2026-01-05
       - Added sub create_related() to DBIx::Class::Async::Row.
 

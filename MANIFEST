@@ -1,5 +1,6 @@
 Changes
 lib/DBIx/Class/Async.pm
+lib/DBIx/Class/Async/Cursor.pm
 lib/DBIx/Class/Async/ResultSet.pm
 lib/DBIx/Class/Async/Row.pm
 lib/DBIx/Class/Async/Schema.pm
@@ -33,6 +34,7 @@ t/19-debug-schema.t
 t/20-debug-async-create.t
 t/21-debug-wrapper.t
 t/22-minimal-working.t
+t/23-cursor.t
 t/manifest.t
 t/pod.t
 t/test.db

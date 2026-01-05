@@ -9,6 +9,7 @@ use Carp;
 use Future;
 use Scalar::Util 'blessed';
 use DBIx::Class::Async::Row;
+use DBIx::Class::Async::Cursor;
 
 =head1 NAME
 
@@ -16,11 +17,11 @@ DBIx::Class::Async::ResultSet - Asynchronous ResultSet for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.08
+Version 0.09
 
 =cut
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 
 =head1 SYNOPSIS
 
@@ -797,6 +798,25 @@ sub search {
     }, ref $self;
 
     return $clone;
+}
+
+=head2 cursor
+
+  my $cursor = $rs->cursor;
+
+Returns a L<DBIx::Class::Async::Cursor> object for the current resultset.
+This is used to stream through large data sets asynchronously without
+loading all records into memory at once.
+
+=cut
+
+sub cursor {
+    my ($self) = @_;
+
+    # We return a specialised Cursor object
+    return DBIx::Class::Async::Cursor->new(
+        rs => $self,
+    );
 }
 
 =head2 single
