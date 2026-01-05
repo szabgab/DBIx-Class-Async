@@ -1,5 +1,8 @@
 Revision history for DBIx::Class::Async
 
+0.06  2026-01-05
+      - Fixed sub next() in DBIx::Class::Async::ResultSet.
+
 0.05  2026-01-04
       - Removed redundant documented attributes.
 

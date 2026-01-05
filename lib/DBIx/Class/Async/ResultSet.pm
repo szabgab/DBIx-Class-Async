@@ -16,11 +16,11 @@ DBIx::Class::Async::ResultSet - Asynchronous ResultSet for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.05
+Version 0.06
 
 =cut
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 =head1 SYNOPSIS
 
@@ -608,9 +608,12 @@ sub next {
 
     # If we haven't fetched yet, do a blocking fetch
     unless ($self->{_rows}) {
-        $self->{_rows} = [$self->all->get];
-        $self->{_pos}  = 0;
+        $self->{_rows} = $self->all->get;
     }
+
+    $self->{_pos} //= 0;
+
+    return undef if $self->{_pos} >= @{$self->{_rows}};
 
     return $self->{_rows}[$self->{_pos}++];
 }
