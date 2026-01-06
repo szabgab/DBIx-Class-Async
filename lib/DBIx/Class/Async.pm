@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.09';
+$DBIx::Class::Async::VERSION   = '0.10';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.09
+Version 0.10
 
 =cut
 
@@ -28,6 +28,8 @@ use Time::HiRes qw(time);
 use Digest::MD5 qw(md5_hex);
 use Type::Params qw(compile);
 use Types::Standard qw(Str HashRef ArrayRef Maybe Int CodeRef);
+
+our $METRICS;
 
 use constant {
     DEFAULT_WORKERS       => 4,
@@ -257,176 +259,6 @@ sub new {
     return $self;
 }
 
-sub _build_default_cache {
-    my ($ttl) = @_;
-
-    my %params = (
-        driver => 'Memory',
-        global => 1,
-    );
-
-    # Add expires_in only if ttl is defined (undef means never expire in CHI)
-    $params{expires_in} = $ttl if defined $ttl;
-
-    return CHI->new(%params);
-}
-
-our $metrics;
-
-sub _init_metrics {
-    my $self = shift;
-
-    # Try to load Metrics::Any
-    eval {
-        require Metrics::Any;
-        Metrics::Any->import('$metrics');
-
-        # Initialize metrics
-        $metrics->make_counter('db_async_queries_total');
-        $metrics->make_counter('db_async_cache_hits_total');
-        $metrics->make_counter('db_async_cache_misses_total');
-        $metrics->make_histogram('db_async_query_duration_seconds');
-        $metrics->make_gauge('db_async_workers_active');
-
-    };
-
-    # Silently ignore if Metrics::Any is not available
-    if ($@) {
-        $self->{enable_metrics} = 0;
-        undef $metrics;
-    }
-}
-
-sub _init_workers {
-    my $self = shift;
-
-    for my $worker_id (1..$self->{workers_config}{count}) {
-        my $worker = IO::Async::Function->new(
-            code => sub {
-                use feature 'state';
-                my ($schema_class, $connect_info, $worker_config, $operation, @op_args) = @_;
-
-                # Get worker PID for state management
-                my $pid = $$;
-
-                # Create or reuse schema connection
-                state $schema_cache = {};
-
-                unless (exists $schema_cache->{$pid}) {
-                    # Load schema class in worker process
-                    eval "require $schema_class; 1;" or do {
-                        my $error = $@ || 'Unknown error loading schema class';
-                        die "Failed to load schema class $schema_class: $error";
-                    };
-
-                    # Verify the class loaded correctly
-                    unless ($schema_class->can('connect')) {
-                        die "Schema class $schema_class does not provide 'connect' method";
-                    }
-
-                    # Connect to database with error handling
-                    my $schema = eval {
-                        $schema_class->connect(@$connect_info);
-                    };
-
-                    if ($@) {
-                        die "Failed to connect to database: $@";
-                    }
-
-                    unless (defined $schema) {
-                        die "Schema connection returned undef";
-                    }
-
-                    $schema_cache->{$pid} = $schema;
-
-                    # Execute on_connect_do statements
-                    if (@{$worker_config->{on_connect_do}}) {
-                        eval {
-                            my $storage = $schema_cache->{$pid}->storage;
-                            my $dbh = $storage->dbh;
-                            $dbh->do($_) for @{$worker_config->{on_connect_do}};
-                        };
-                        if ($@) {
-                            warn "on_connect_do failed: $@";
-                        }
-                    }
-
-                    # Set connection attributes
-                    eval {
-                        $schema_cache->{$pid}->storage->debug(0) unless $ENV{DBIC_TRACE};
-                    };
-
-                    # Verify schema instance has sources
-                    eval {
-                        my @instance_sources = $schema_cache->{$pid}->sources;
-                        unless (@instance_sources) {
-                            # Try to force reload the schema
-                            delete $schema_cache->{$pid};
-                            die "Connected schema instance has no registered sources";
-                        }
-                    };
-                    if ($@) {
-                        # If sources check failed, don't cache this connection
-                        delete $schema_cache->{$pid};
-                        die "Schema validation failed: $@";
-                    }
-                }
-
-                # Execute operation with timeout
-                local $SIG{ALRM} = sub {
-                    die "Query timeout after $worker_config->{query_timeout} seconds\n"
-                };
-
-                alarm($worker_config->{query_timeout});
-
-                my $result;
-                eval {
-                    $result = _execute_operation($schema_cache->{$pid}, $operation, @op_args);
-                };
-                my $error = $@;
-
-                alarm(0);
-
-                if ($error) {
-                    die $error;
-                }
-
-                return $result;
-            },
-            max_workers => 1,  # One process per worker
-        );
-
-        $self->{loop}->add($worker);
-        push @{$self->{workers}}, {
-            instance => $worker,
-            healthy  => 1,
-            pid      => undef,  # Will be set on first use
-        };
-    }
-}
-
-sub _start_health_checks {
-    my ($self, $interval) = @_;
-
-    return if $interval <= 0;
-
-    # Try to create the timer
-    eval {
-        $self->{health_check_timer} = $self->{loop}->repeat(
-            interval => $interval,
-            code => sub {
-                # Don't use async here - just fire and forget
-                $self->health_check->retain;
-            },
-        );
-    };
-
-    if ($@) {
-        # If repeat fails, try a different approach or disable health checks
-        warn "Failed to start health checks: $@" if $ENV{DBIC_ASYNC_DEBUG};
-    }
-}
-
 =head1 METHODS
 
 =head2 search
@@ -494,6 +326,108 @@ sub search {
             $self->{cache}->set($cache_key, $result, $self->{cache_ttl});
         }
 
+        return Future->done($result);
+    });
+}
+
+=head2 search_multi
+
+Executes multiple search queries concurrently.
+
+    my @results = await $async_db->search_multi(
+        ['User', { active => 1 }, { rows => 10 }],
+        ['Product', { category => 'books' }],
+        ['Order', undef, { order_by => 'created_at DESC', rows => 5 }],
+    );
+
+Returns: Array of results in the same order as queries.
+
+=cut
+
+sub search_multi {
+    my ($self, @queries) = @_;
+
+    $self->{stats}{queries} += scalar @queries;
+    $self->_record_metric('inc', 'db_async_queries_total', scalar @queries);
+
+    my @futures = map {
+        my ($resultset, $search_args, $attrs) = @$_;
+        $self->_call_worker('search', $resultset, $search_args, $attrs)
+    } @queries;
+
+    my $start_time = time;
+
+    return Future->wait_all(@futures)->then(sub {
+        my @results = @_;
+
+        my $duration = time - $start_time;
+        $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
+
+        # Extract values from completed futures
+        my @values = map { $_->get } @results;
+
+        return Future->done(@values);
+    });
+}
+
+=head2 search_with_prefetch (BROKEN)
+
+Search with eager loading of relationships.
+
+    my $users_with_orders = await $async_db->search_with_prefetch(
+        'User',
+        { active => 1 },
+        'orders',  # Relationship name or arrayref for multiple
+        { rows => 10 }
+    );
+
+Returns: Arrayref of results with prefetched data.
+
+This method consistently fails with "closed" errors across all database
+backends.
+
+B<Migration Path>:
+
+Replace any C<search_with_prefetch> calls with separate queries:
+
+    # Old code (broken):
+    my $users = await $db->search_with_prefetch(
+        'User', { active => 1 }, 'posts', {}
+    );
+
+    # New code (working):
+    my $users = await $db->search('User', { active => 1 }, {});
+    foreach my $user (@$users) {
+        my $posts = await $db->search('Post', { user_id => $user->{id} }, {});
+        $user->{posts} = $posts;
+    }
+
+For parallel fetching, see L</KNOWN ISSUES> for optimised patterns using
+C<Future::Utils::fmap_concat>.
+
+=cut
+
+sub search_with_prefetch {
+    my ($self, $resultset, $search_args, $prefetch, $attrs) = @_;
+
+    state $check = compile(Str, Maybe[HashRef], Str|ArrayRef, Maybe[HashRef]);
+    $check->($resultset, $search_args, $prefetch, $attrs);
+
+    $self->{stats}{queries}++;
+    $self->_record_metric('inc', 'db_async_queries_total');
+
+    my $start_time = time;
+
+    return $self->_call_worker(
+        'search_with_prefetch',
+        $resultset,
+        $search_args,
+        $prefetch,
+        $attrs
+    )->then(sub {
+        my ($result) = @_;
+        my $duration = time - $start_time;
+        $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
         return Future->done($result);
     });
 }
@@ -614,6 +548,95 @@ sub update {
         $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
         return Future->done($result);
     });
+}
+
+=head2 update_bulk
+
+    $db->update_bulk($table, $condition, $data);
+
+Performs a bulk update operation on multiple rows in the specified table.
+
+This method updates all rows in the given table that match the specified
+conditions with the provided data values. It is particularly useful for
+batch operations where multiple records need to be modified with the same
+set of changes.
+
+=over 4
+
+=item Parameters
+
+=over 8
+
+=item C<$table>
+
+The name of the table to update (String, required).
+
+=item C<$condition>
+
+A hash reference specifying the WHERE conditions for selecting rows to update.
+Each key-value pair in the hash represents a column and its required value.
+Rows matching ALL conditions will be updated (HashRef, required).
+
+Example: C<< { status => 'pending', active => 1 } >>
+
+=item C<$data>
+
+A hash reference containing the column-value pairs to update.
+Each key-value pair specifies a column and its new value (HashRef, required).
+
+Example: C<< { status => 'processed', updated_at => '2024-01-01 10:00:00' } >>
+
+=back
+
+=item Returns
+
+Returns the result of the update operation from the worker. Typically this
+would be the number of rows affected or a success indicator, depending on
+your worker implementation.
+
+=item Exceptions
+
+=over 4
+
+=item *
+
+Throws a validation error if any parameter does not match the expected type.
+
+=item *
+
+Throws an exception if the underlying worker call fails.
+
+=back
+
+=item Examples
+
+    # Update all pending orders from a specific customer
+    my $result = $db->update_bulk(
+        'orders',
+        { customer_id => 123, status => 'pending' },
+        { status => 'processed', processed_at => \'NOW()' }
+    );
+
+    print "Updated $result rows\n";
+
+    # Deactivate all users who haven't logged in since 2023
+    $db->update_bulk(
+        'users',
+        { last_login => { '<' => '2023-01-01' } },
+        { active => 0, deactivation_date => \'CURRENT_DATE' }
+    );
+
+=back
+
+=cut
+
+sub update_bulk {
+    my ($self, $table, $condition, $data) = @_;
+
+    state $check = compile(Str, HashRef, HashRef);
+    $check->($table, $condition, $data);
+
+    return $self->_call_worker('update_bulk', $table, $condition, $data);
 }
 
 =head2 delete
@@ -907,108 +930,6 @@ sub txn_batch {
     });
 }
 
-=head2 search_multi
-
-Executes multiple search queries concurrently.
-
-    my @results = await $async_db->search_multi(
-        ['User', { active => 1 }, { rows => 10 }],
-        ['Product', { category => 'books' }],
-        ['Order', undef, { order_by => 'created_at DESC', rows => 5 }],
-    );
-
-Returns: Array of results in the same order as queries.
-
-=cut
-
-sub search_multi {
-    my ($self, @queries) = @_;
-
-    $self->{stats}{queries} += scalar @queries;
-    $self->_record_metric('inc', 'db_async_queries_total', scalar @queries);
-
-    my @futures = map {
-        my ($resultset, $search_args, $attrs) = @$_;
-        $self->_call_worker('search', $resultset, $search_args, $attrs)
-    } @queries;
-
-    my $start_time = time;
-
-    return Future->wait_all(@futures)->then(sub {
-        my @results = @_;
-
-        my $duration = time - $start_time;
-        $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
-
-        # Extract values from completed futures
-        my @values = map { $_->get } @results;
-
-        return Future->done(@values);
-    });
-}
-
-=head2 search_with_prefetch (BROKEN)
-
-Search with eager loading of relationships.
-
-    my $users_with_orders = await $async_db->search_with_prefetch(
-        'User',
-        { active => 1 },
-        'orders',  # Relationship name or arrayref for multiple
-        { rows => 10 }
-    );
-
-Returns: Arrayref of results with prefetched data.
-
-This method consistently fails with "closed" errors across all database
-backends.
-
-B<Migration Path>:
-
-Replace any C<search_with_prefetch> calls with separate queries:
-
-    # Old code (broken):
-    my $users = await $db->search_with_prefetch(
-        'User', { active => 1 }, 'posts', {}
-    );
-
-    # New code (working):
-    my $users = await $db->search('User', { active => 1 }, {});
-    foreach my $user (@$users) {
-        my $posts = await $db->search('Post', { user_id => $user->{id} }, {});
-        $user->{posts} = $posts;
-    }
-
-For parallel fetching, see L</KNOWN ISSUES> for optimised patterns using
-C<Future::Utils::fmap_concat>.
-
-=cut
-
-sub search_with_prefetch {
-    my ($self, $resultset, $search_args, $prefetch, $attrs) = @_;
-
-    state $check = compile(Str, Maybe[HashRef], Str|ArrayRef, Maybe[HashRef]);
-    $check->($resultset, $search_args, $prefetch, $attrs);
-
-    $self->{stats}{queries}++;
-    $self->_record_metric('inc', 'db_async_queries_total');
-
-    my $start_time = time;
-
-    return $self->_call_worker(
-        'search_with_prefetch',
-        $resultset,
-        $search_args,
-        $prefetch,
-        $attrs
-    )->then(sub {
-        my ($result) = @_;
-        my $duration = time - $start_time;
-        $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
-        return Future->done($result);
-    });
-}
-
 =head2 health_check
 
 Performs health check on all workers.
@@ -1055,14 +976,14 @@ sub health_check {
 sub _record_metric {
     my ($self, $type, $name, @args) = @_;
 
-    return unless $self->{enable_metrics} && defined $metrics;
+    return unless $self->{enable_metrics} && defined $METRICS;
 
     if ($type eq 'inc') {
-        $metrics->inc($name, @args);
+        $METRICS->inc($name, @args);
     } elsif ($type eq 'observe') {
-        $metrics->observe($name, @args);
+        $METRICS->observe($name, @args);
     } elsif ($type eq 'set') {
-        $metrics->set($name, @args);
+        $METRICS->set($name, @args);
     }
 }
 
@@ -1142,98 +1063,177 @@ sub schema_class {
     return $self->{schema_class};
 }
 
-=head2 update_bulk
-
-    $db->update_bulk($table, $condition, $data);
-
-Performs a bulk update operation on multiple rows in the specified table.
-
-This method updates all rows in the given table that match the specified
-conditions with the provided data values. It is particularly useful for
-batch operations where multiple records need to be modified with the same
-set of changes.
-
-=over 4
-
-=item Parameters
-
-=over 8
-
-=item C<$table>
-
-The name of the table to update (String, required).
-
-=item C<$condition>
-
-A hash reference specifying the WHERE conditions for selecting rows to update.
-Each key-value pair in the hash represents a column and its required value.
-Rows matching ALL conditions will be updated (HashRef, required).
-
-Example: C<< { status => 'pending', active => 1 } >>
-
-=item C<$data>
-
-A hash reference containing the column-value pairs to update.
-Each key-value pair specifies a column and its new value (HashRef, required).
-
-Example: C<< { status => 'processed', updated_at => '2024-01-01 10:00:00' } >>
-
-=back
-
-=item Returns
-
-Returns the result of the update operation from the worker. Typically this
-would be the number of rows affected or a success indicator, depending on
-your worker implementation.
-
-=item Exceptions
-
-=over 4
-
-=item *
-
-Throws a validation error if any parameter does not match the expected type.
-
-=item *
-
-Throws an exception if the underlying worker call fails.
-
-=back
-
-=item Examples
-
-    # Update all pending orders from a specific customer
-    my $result = $db->update_bulk(
-        'orders',
-        { customer_id => 123, status => 'pending' },
-        { status => 'processed', processed_at => \'NOW()' }
-    );
-
-    print "Updated $result rows\n";
-
-    # Deactivate all users who haven't logged in since 2023
-    $db->update_bulk(
-        'users',
-        { last_login => { '<' => '2023-01-01' } },
-        { active => 0, deactivation_date => \'CURRENT_DATE' }
-    );
-
-=back
-
-=cut
-
-sub update_bulk {
-    my ($self, $table, $condition, $data) = @_;
-
-    state $check = compile(Str, HashRef, HashRef);
-    $check->($table, $condition, $data);
-
-    return $self->_call_worker('update_bulk', $table, $condition, $data);
-}
-
 #
 #
 # INTERNAL METHODS
+
+sub _build_default_cache {
+    my ($ttl) = @_;
+
+    my %params = (
+        driver => 'Memory',
+        global => 1,
+    );
+
+    # Add expires_in only if ttl is defined (undef means never expire in CHI)
+    $params{expires_in} = $ttl if defined $ttl;
+
+    return CHI->new(%params);
+}
+
+sub _init_metrics {
+    my $self = shift;
+
+    # Try to load Metrics::Any
+    eval {
+        require Metrics::Any;
+        Metrics::Any->import('$METRICS');
+
+        # Initialize metrics
+        $METRICS->make_counter('db_async_queries_total');
+        $METRICS->make_counter('db_async_cache_hits_total');
+        $METRICS->make_counter('db_async_cache_misses_total');
+        $METRICS->make_histogram('db_async_query_duration_seconds');
+        $METRICS->make_gauge('db_async_workers_active');
+
+    };
+
+    # Silently ignore if Metrics::Any is not available
+    if ($@) {
+        $self->{enable_metrics} = 0;
+        undef $METRICS;
+    }
+}
+
+sub _init_workers {
+    my $self = shift;
+
+    for my $worker_id (1..$self->{workers_config}{count}) {
+        my $worker = IO::Async::Function->new(
+            code => sub {
+                use feature 'state';
+                my ($schema_class, $connect_info, $worker_config, $operation, @op_args) = @_;
+
+                # Get worker PID for state management
+                my $pid = $$;
+
+                # Create or reuse schema connection
+                state $schema_cache = {};
+
+                unless (exists $schema_cache->{$pid}) {
+                    # Load schema class in worker process
+                    eval "require $schema_class; 1;" or do {
+                        my $error = $@ || 'Unknown error loading schema class';
+                        die "Failed to load schema class $schema_class: $error";
+                    };
+
+                    # Verify the class loaded correctly
+                    unless ($schema_class->can('connect')) {
+                        die "Schema class $schema_class does not provide 'connect' method";
+                    }
+
+                    # Connect to database with error handling
+                    my $schema = eval {
+                        $schema_class->connect(@$connect_info);
+                    };
+
+                    if ($@) {
+                        die "Failed to connect to database: $@";
+                    }
+
+                    unless (defined $schema) {
+                        die "Schema connection returned undef";
+                    }
+
+                    $schema_cache->{$pid} = $schema;
+
+                    # Execute on_connect_do statements
+                    if (@{$worker_config->{on_connect_do}}) {
+                        eval {
+                            my $storage = $schema_cache->{$pid}->storage;
+                            my $dbh = $storage->dbh;
+                            $dbh->do($_) for @{$worker_config->{on_connect_do}};
+                        };
+                        if ($@) {
+                            warn "on_connect_do failed: $@";
+                        }
+                    }
+
+                    # Set connection attributes
+                    eval {
+                        $schema_cache->{$pid}->storage->debug(0) unless $ENV{DBIC_TRACE};
+                    };
+
+                    # Verify schema instance has sources
+                    eval {
+                        my @instance_sources = $schema_cache->{$pid}->sources;
+                        unless (@instance_sources) {
+                            # Try to force reload the schema
+                            delete $schema_cache->{$pid};
+                            die "Connected schema instance has no registered sources";
+                        }
+                    };
+                    if ($@) {
+                        # If sources check failed, don't cache this connection
+                        delete $schema_cache->{$pid};
+                        die "Schema validation failed: $@";
+                    }
+                }
+
+                # Execute operation with timeout
+                local $SIG{ALRM} = sub {
+                    die "Query timeout after $worker_config->{query_timeout} seconds\n"
+                };
+
+                alarm($worker_config->{query_timeout});
+
+                my $result;
+                eval {
+                    $result = _execute_operation($schema_cache->{$pid}, $operation, @op_args);
+                };
+                my $error = $@;
+
+                alarm(0);
+
+                if ($error) {
+                    die $error;
+                }
+
+                return $result;
+            },
+            max_workers => 1,  # One process per worker
+        );
+
+        $self->{loop}->add($worker);
+        push @{$self->{workers}}, {
+            instance => $worker,
+            healthy  => 1,
+            pid      => undef,  # Will be set on first use
+        };
+    }
+}
+
+sub _start_health_checks {
+    my ($self, $interval) = @_;
+
+    return if $interval <= 0;
+
+    # Try to create the timer
+    eval {
+        $self->{health_check_timer} = $self->{loop}->repeat(
+            interval => $interval,
+            code => sub {
+                # Don't use async here - just fire and forget
+                $self->health_check->retain;
+            },
+        );
+    };
+
+    if ($@) {
+        # If repeat fails, try a different approach or disable health checks
+        warn "Failed to start health checks: $@" if $ENV{DBIC_ASYNC_DEBUG};
+    }
+}
 
 sub _execute_operation {
     my ($schema, $operation, @args) = @_;

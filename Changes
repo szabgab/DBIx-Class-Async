@@ -1,5 +1,8 @@
 Revision history for DBIx::Class::Async
 
+0.10  2026-01-06
+      - POD cleanup in general.
+
 0.09  2026-01-05
       - Added support for Cursor.
 

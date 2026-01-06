@@ -17,11 +17,11 @@ DBIx::Class::Async::ResultSet - Asynchronous ResultSet for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.09
+Version 0.10
 
 =cut
 
-our $VERSION = '0.09';
+our $VERSION = '0.10';
 
 =head1 SYNOPSIS
 
@@ -308,6 +308,27 @@ sub all_future {
     });
 }
 
+=head2 as_query
+
+    my ($cond, $attrs) = $rs->as_query;
+
+Returns the internal search conditions and attributes.
+
+=over 4
+
+=item B<Returns>
+
+A list containing two hash references: conditions and attributes.
+
+=back
+
+=cut
+
+sub as_query {
+    my $self = shift;
+    return ($self->{_cond}, $self->{_attrs});
+}
+
 =head2 count
 
     $rs->count->then(sub {
@@ -423,6 +444,25 @@ sub create {
 
         return Future->done($self->new_result($result));
     });
+}
+
+=head2 cursor
+
+  my $cursor = $rs->cursor;
+
+Returns a L<DBIx::Class::Async::Cursor> object for the current resultset.
+This is used to stream through large data sets asynchronously without
+loading all records into memory at once.
+
+=cut
+
+sub cursor {
+    my ($self) = @_;
+
+    # We return a specialised Cursor object
+    return DBIx::Class::Async::Cursor->new(
+        rs => $self,
+    );
 }
 
 =head2 delete
@@ -581,6 +621,18 @@ sub first {
         return Future->done($rows[0]);
     });
 }
+
+=head2 first_future
+
+    $rs->first_future->then(sub {
+        # Same as single_future, alias for API consistency
+    });
+
+Alias for C<single_future>.
+
+=cut
+
+sub first_future { shift->single_future(@_) }
 
 =head2 get
 
@@ -749,6 +801,27 @@ sub reset {
     return $self;
 }
 
+=head2 result_source
+
+    my $source = $rs->result_source;
+
+Returns the result source object for this result set.
+
+=over 4
+
+=item B<Returns>
+
+A L<DBIx::Class::ResultSource> object.
+
+=back
+
+=cut
+
+sub result_source {
+    my $self = shift;
+    return $self->_get_source;
+}
+
 =head2 search
 
     my $filtered_rs = $rs->search({ active => 1 }, { order_by => 'name' });
@@ -798,25 +871,6 @@ sub search {
     }, ref $self;
 
     return $clone;
-}
-
-=head2 cursor
-
-  my $cursor = $rs->cursor;
-
-Returns a L<DBIx::Class::Async::Cursor> object for the current resultset.
-This is used to stream through large data sets asynchronously without
-loading all records into memory at once.
-
-=cut
-
-sub cursor {
-    my ($self) = @_;
-
-    # We return a specialised Cursor object
-    return DBIx::Class::Async::Cursor->new(
-        rs => $self,
-    );
 }
 
 =head2 single
@@ -911,6 +965,18 @@ sub single_future {
     });
 }
 
+=head2 search_future
+
+    $rs->search_future->then(sub {
+        # Same as all_future, alias for API consistency
+    });
+
+Alias for C<all_future>.
+
+=cut
+
+sub search_future { shift->all_future(@_)  }
+
 =head2 update
 
     $rs->search({ status => 'pending' })->update({ status => 'processed' })
@@ -962,49 +1028,7 @@ sub update {
     });
 }
 
-=head2 as_query
-
-    my ($cond, $attrs) = $rs->as_query;
-
-Returns the internal search conditions and attributes.
-
-=over 4
-
-=item B<Returns>
-
-A list containing two hash references: conditions and attributes.
-
-=back
-
-=cut
-
-sub as_query {
-    my $self = shift;
-    return ($self->{_cond}, $self->{_attrs});
-}
-
-=head2 result_source
-
-    my $source = $rs->result_source;
-
-Returns the result source object for this result set.
-
-=over 4
-
-=item B<Returns>
-
-A L<DBIx::Class::ResultSource> object.
-
-=back
-
-=cut
-
-sub result_source {
-    my $self = shift;
-    return $self->_get_source;
-}
-
-=head2 source
+=head2 source_name
 
     my $source_name = $rs->source_name;
 
@@ -1039,7 +1063,7 @@ A L<DBIx::Class::ResultSource> object.
 
 =back
 
-=cut
+sub source { shift->_get_source }
 
 =head1 CHAINABLE MODIFIERS
 
@@ -1081,29 +1105,13 @@ These methods are for internal use and are documented for completeness.
 
 Returns the result source object, loading it lazily if needed.
 
-=head2 search_future
-
-    $rs->search_future->then(sub {
-        # Same as all_future, alias for API consistency
-    });
-
-Alias for C<all_future>.
-
-=head2 first_future
-
-    $rs->first_future->then(sub {
-        # Same as single_future, alias for API consistency
-    });
-
-Alias for C<single_future>.
-
 =cut
 
-# Internal methods and dynamic method generation follow...
-
-# Alias for convenience
-sub search_future { shift->all_future(@_)    }
-sub first_future  { shift->single_future(@_) }
+sub _get_source {
+    my $self = shift;
+    $self->{_source} ||= $self->{schema}->source($self->{source_name});
+    return $self->{_source};
+}
 
 # Chainable modifiers
 foreach my $method (qw(rows page order_by columns group_by having distinct)) {
@@ -1113,14 +1121,6 @@ foreach my $method (qw(rows page order_by columns group_by having distinct)) {
         return $self->search(undef, { $method => $value });
     };
 }
-
-sub _get_source {
-    my $self = shift;
-    $self->{_source} ||= $self->{schema}->source($self->{source_name});
-    return $self->{_source};
-}
-
-sub source { shift->_get_source }
 
 =head1 SEE ALSO
 
