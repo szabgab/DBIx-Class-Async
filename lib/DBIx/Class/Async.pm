@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.11';
+$DBIx::Class::Async::VERSION   = '0.12';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.11
+Version 0.12
 
 =cut
 
@@ -1027,7 +1027,7 @@ sub _init_metrics {
         require Metrics::Any;
         Metrics::Any->import('$METRICS');
 
-        # Initialize metrics
+        # Initialise metrics
         $METRICS->make_counter('db_async_queries_total');
         $METRICS->make_counter('db_async_cache_hits_total');
         $METRICS->make_counter('db_async_cache_misses_total');
@@ -1173,7 +1173,7 @@ sub _start_health_checks {
     }
 }
 
-sub _serialize_row_with_prefetch {
+sub _serialise_row_with_prefetch {
     my ($row, $prefetch) = @_;
     return unless $row;
 
@@ -1182,9 +1182,9 @@ sub _serialize_row_with_prefetch {
 
     # 2. Process Prefetches
     if ($prefetch) {
-        # Normalize prefetch into a hash for easier recursion
+        # Normalise prefetch into a hash for easier recursion
         # (Handles strings, arrays, and nested hashes like { comments => 'user' })
-        my $spec = _normalize_prefetch($prefetch);
+        my $spec = _normalise_prefetch($prefetch);
 
         foreach my $rel (keys %$spec) {
             # Check if DBIC actually prefetched this relationship
@@ -1196,11 +1196,11 @@ sub _serialize_row_with_prefetch {
                 if (ref($related) eq 'DBIx::Class::ResultSet' || $related->isa('DBIx::Class::ResultSet')) {
                     # has_many relationship
                     $data{$rel} = [
-                        map { _serialize_row_with_prefetch($_, $spec->{$rel}) } $related->all
+                        map { _serialise_row_with_prefetch($_, $spec->{$rel}) } $related->all
                     ];
                 } else {
                     # belongs_to / might_have relationship
-                    $data{$rel} = _serialize_row_with_prefetch($related, $spec->{$rel});
+                    $data{$rel} = _serialise_row_with_prefetch($related, $spec->{$rel});
                 }
             }
         }
@@ -1209,7 +1209,7 @@ sub _serialize_row_with_prefetch {
     return \%data;
 }
 
-sub _normalize_prefetch {
+sub _normalise_prefetch {
     my $p = shift;
     return {} unless $p;
     return { $p => undef } if !ref $p;
@@ -1231,7 +1231,7 @@ sub _execute_operation {
 
             # Map rows to deep hashes if prefetch is active
             my @results = map {
-                _serialize_row_with_prefetch($_, $attrs->{prefetch})
+                _serialise_row_with_prefetch($_, $attrs->{prefetch})
             } @rows;
 
             \@results;
@@ -1252,7 +1252,7 @@ sub _execute_operation {
 
         if ($@) { die "Find operation failed on $source_name: $@"; }
 
-        return $row ? _serialize_row_with_prefetch($row, $attrs->{prefetch}) : undef;
+        return $row ? _serialise_row_with_prefetch($row, $attrs->{prefetch}) : undef;
     }
     elsif ($operation eq 'create') {
         my ($source_name, $data) = @args;
@@ -1277,7 +1277,7 @@ sub _execute_operation {
 
             $row->update($data);
 
-            return _serialize_row_with_prefetch($row, $attrs->{prefetch});
+            return _serialise_row_with_prefetch($row, $attrs->{prefetch});
         };
 
         if ($@) { die "Update operation failed on $source_name: $@"; }
