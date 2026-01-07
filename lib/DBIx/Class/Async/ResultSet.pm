@@ -17,11 +17,11 @@ DBIx::Class::Async::ResultSet - Asynchronous ResultSet for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.12
+Version 0.13
 
 =cut
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 
 =head1 SYNOPSIS
 
@@ -797,6 +797,94 @@ sub prefetch {
     return $self->search(undef, { prefetch => $prefetch });
 }
 
+=head2 related_resultset
+
+  my $users_rs = $orders_rs->related_resultset('user');
+
+Returns a new ResultSet for a related table based on a relationship name.
+The new ResultSet will be constrained to only include records that are
+related to records in the current ResultSet.
+
+=cut
+
+sub related_resultset {
+    my ($self, $relation) = @_;
+
+    croak("Relationship name is required") unless defined $relation;
+
+    my $source = $self->result_source;
+
+    unless ($source->has_relationship($relation)) {
+        croak("No such relationship '$relation' on " . $source->source_name);
+    }
+
+    my $rel_info   = $source->relationship_info($relation);
+    my $rel_source = $source->related_source($relation);
+    my $cond       = $rel_info->{cond};
+
+    # Build the join condition
+    my ($foreign_key, $self_key);
+
+    if (ref $cond eq 'HASH') {
+        my ($foreign_col, $self_col) = %$cond;
+
+        # Handle complex condition structures
+        if (ref $self_col eq 'HASH') {
+            my ($op, $col) = %$self_col;
+            $self_col = $col;
+        }
+
+        $foreign_col =~ s/^foreign\.//;
+        $self_col    =~ s/^self\.//;
+        $foreign_key =  $foreign_col;
+        $self_key    =  $self_col;
+    } else {
+        croak("Complex relationship conditions not yet supported");
+    }
+
+    my $reverse_rel = $self->_find_reverse_relationship($source, $rel_source, $relation);
+
+    unless ($reverse_rel) {
+        croak("Cannot find reverse relationship from " .
+              $rel_source->source_name . " back to " .
+              $source->source_name);
+    }
+
+    # Build new search condition with prefixed keys
+    my %prefixed_cond;
+    while (my ($key, $value) = each %{$self->{_cond}}) {
+        # Add the reverse relationship prefix to existing conditions
+        if ($key =~ /\./) {
+            $prefixed_cond{$key} = $value;
+        } else {
+            $prefixed_cond{"$reverse_rel.$key"} = $value;
+        }
+    }
+
+    # Get all columns from the related source for proper GROUP BY
+    my @columns = $rel_source->columns;
+    my @select = map { "me.$_" } @columns;
+    my @group_by = map { "me.$_" } @columns;
+
+    # Create attributes with join
+    my %new_attrs = (
+        join     => $reverse_rel,
+        select   => \@select,
+        as       => \@columns,
+        group_by => \@group_by,
+        %{$self->{_attrs}},
+    );
+
+    # Remove any conflicting attributes from the original ResultSet
+    delete $new_attrs{prefetch} if exists $new_attrs{prefetch};
+
+    # Create and return the new ResultSet
+    return $self->{schema}->resultset($rel_source->source_name)->search(
+        \%prefixed_cond,
+        \%new_attrs
+    );
+}
+
 =head2 reset
 
     $rs->reset;
@@ -1288,6 +1376,77 @@ sub _inflate_nested_prefetch {
             );
         }
     }
+}
+
+=head2 _find_reverse_relationship (Internal)
+
+Finds the reverse relationship name on the related source.
+
+=cut
+
+sub _find_reverse_relationship {
+    my ($self, $source, $rel_source, $forward_rel) = @_;
+
+    my @rel_names    = $rel_source->relationships;
+    my $forward_info = $source->relationship_info($forward_rel);
+    my $forward_cond = $forward_info->{cond};
+
+    # Extract keys from forward condition
+    my ($forward_foreign, $forward_self);
+    if (ref $forward_cond eq 'HASH') {
+        my ($f, $s) = %$forward_cond;
+        if (ref $s eq 'HASH') {
+            my ($op, $col) = %$s;
+            $s = $col;
+        }
+        $forward_foreign = $f;
+        $forward_self    = $s;
+        $forward_foreign =~ s/^foreign\.//;
+        $forward_self    =~ s/^self\.//;
+    }
+
+    # Look for a relationship that points back to our source
+    foreach my $rev_rel (@rel_names) {
+        my $rev_info       = $rel_source->relationship_info($rev_rel);
+        my $rev_source_obj = $rel_source->related_source($rev_rel);
+
+        # Check if this relationship points back to our original source
+        next unless $rev_source_obj->source_name eq $source->source_name;
+
+        # Check if the foreign keys match (in reverse)
+        my $rev_cond = $rev_info->{cond};
+        if (ref $rev_cond eq 'HASH') {
+            my ($rev_foreign, $rev_self) = %$rev_cond;
+
+            if (ref $rev_self eq 'HASH') {
+                my ($op, $col) = %$rev_self;
+                $rev_self = $col;
+            }
+
+            $rev_foreign =~ s/^foreign\.//;
+            $rev_self    =~ s/^self\.//;
+
+            # Check if the keys match in reverse
+            # Forward: foreign.id => self.user_id
+            # Reverse: foreign.user_id => self.id
+            if ($rev_foreign eq $forward_self && $rev_self eq $forward_foreign) {
+                return $rev_rel;
+            }
+        }
+    }
+
+    # If we couldn't find it by key matching, try by source name
+    # This is a fallback for simple cases
+    foreach my $rev_rel (@rel_names) {
+        my $rev_info       = $rel_source->relationship_info($rev_rel);
+        my $rev_source_obj = $rel_source->related_source($rev_rel);
+
+        if ($rev_source_obj->source_name eq $source->source_name) {
+            return $rev_rel;
+        }
+    }
+
+    return undef;
 }
 
 # Chainable modifiers
