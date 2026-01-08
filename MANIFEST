@@ -41,6 +41,7 @@ t/26-slice.t
 t/27-async-populate.t
 t/28-find-or.t
 t/29-update-or.t
+t/30-delete-all.t
 t/manifest.t
 t/pod.t
 t/test.db

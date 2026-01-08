@@ -17,11 +17,11 @@ DBIx::Class::Async::ResultSet - Asynchronous ResultSet for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.17
+Version 0.18
 
 =cut
 
-our $VERSION = '0.17';
+our $VERSION = '0.18';
 
 =head1 SYNOPSIS
 
@@ -222,8 +222,8 @@ sub new_result_set {
         # $rows is an arrayref of DBIx::Class::Async::Row objects
     });
 
-Returns all rows matching the current search criteria as L<DBIx::Class::Async::Row>
-objects.
+Returns all rows matching the current search criteria as L<DBIx::Class::Async::Row> objects,
+with prefetched relationships properly inflated.
 
 =over 4
 
@@ -237,13 +237,6 @@ objects.
 Results are cached internally for use with C<next> and C<reset> methods.
 
 =back
-
-=cut
-
-=head2 all
-
-Returns all rows matching the current search criteria as L<DBIx::Class::Async::Row> objects,
-with prefetched relationships properly inflated.
 
 =cut
 
@@ -545,6 +538,92 @@ sub delete {
             foreach my $f (@_) {
                 my $result = eval { $f->get };
                 $deleted_count++ if $result;
+            }
+            return Future->done($deleted_count);
+        });
+    });
+}
+
+=head2 delete_all
+
+  $rs->delete_all->then(sub {
+      my ($deleted_count) = @_;
+      say "Deleted $deleted_count rows";
+  });
+
+Fetches all objects and deletes them one at a time via L<DBIx::Class::Row/delete>.
+
+=over 4
+
+=item B<Arguments>
+
+None
+
+=item B<Returns>
+
+A L<Future> that resolves to the number of rows deleted.
+
+=item B<Difference from delete()>
+
+C<delete_all> will run DBIC-defined triggers (such as C<before_delete>, C<after_delete>),
+and will handle cascading deletes through relationships, while C<delete()> performs
+a more efficient bulk delete that bypasses Row-level operations.
+
+Use C<delete_all> when you need:
+- Row-level triggers to fire
+- Cascading deletes to work properly
+- Accurate counts of rows affected
+
+Use C<delete> when you need:
+- Better performance for large datasets
+- Direct database-level deletion
+
+=item B<Example>
+
+  # Delete with triggers
+  $rs->search({ expired => 1 })->delete_all->then(sub {
+      my ($count) = @_;
+      say "Deleted $count expired records with triggers";
+  });
+
+  # Compare with bulk delete (no triggers)
+  $rs->search({ expired => 1 })->delete->then(sub {
+      my ($count) = @_;
+      say "Bulk deleted $count records (no triggers)";
+  });
+
+=back
+
+=cut
+
+sub delete_all {
+    my $self = shift;
+
+    # Fetch all rows as Row objects (not raw data)
+    return $self->all->then(sub {
+        my ($rows) = @_;
+
+        # If no rows, return 0
+        return Future->done(0) unless @$rows;
+
+        # Delete each Row object individually
+        # This will trigger all DBIC row-level operations
+        my @futures;
+
+        foreach my $row (@$rows) {
+            # Call delete on the Row object
+            # This ensures triggers and cascades work
+            push @futures, $row->delete;
+        }
+
+        return Future->wait_all(@futures)->then(sub {
+            # Count successful deletes
+            my $deleted_count = 0;
+            foreach my $f (@_) {
+                my $result = eval { $f->get };
+                if ($result && !$@) {
+                    $deleted_count++;
+                }
             }
             return Future->done($deleted_count);
         });
@@ -1412,6 +1491,43 @@ sub slice {
     return @$results;
 }
 
+=head2 source
+
+    my $source = $rs->source;
+
+Alias for C<result_source>.
+
+=over 4
+
+=item B<Returns>
+
+A L<DBIx::Class::ResultSource> object.
+
+=back
+
+sub source { shift->_get_source }
+
+=head2 source_name
+
+    my $source_name = $rs->source_name;
+
+Returns the source name for this result set.
+
+=over 4
+
+=item B<Returns>
+
+The source name (string).
+
+=back
+
+=cut
+
+sub source_name {
+    my $self = shift;
+    return $self->{source_name};
+}
+
 =head2 update
 
     $rs->search({ status => 'pending' })->update({ status => 'processed' })
@@ -1556,43 +1672,6 @@ sub update_or_new {
         return Future->done($row);
     });
 }
-
-=head2 source_name
-
-    my $source_name = $rs->source_name;
-
-Returns the source name for this result set.
-
-=over 4
-
-=item B<Returns>
-
-The source name (string).
-
-=back
-
-=cut
-
-sub source_name {
-    my $self = shift;
-    return $self->{source_name};
-}
-
-=head2 source
-
-    my $source = $rs->source;
-
-Alias for C<result_source>.
-
-=over 4
-
-=item B<Returns>
-
-A L<DBIx::Class::ResultSource> object.
-
-=back
-
-sub source { shift->_get_source }
 
 =head1 CHAINABLE MODIFIERS
 

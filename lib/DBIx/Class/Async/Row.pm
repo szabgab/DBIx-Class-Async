@@ -15,11 +15,11 @@ DBIx::Class::Async::Row - Asynchronous Row Object for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.17
+Version 0.18
 
 =cut
 
-our $VERSION = '0.17';
+our $VERSION = '0.18';
 
 =head1 SYNOPSIS
 
