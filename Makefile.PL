@@ -27,6 +27,12 @@ WriteMakefile(
         'Type::Params'        => 0,
         'Types::Standard'     => 0,
     },
+    TEST_REQUIRES => {
+        'DBI'                 => 0,
+        'DBIx::Class'         => 0,
+        'Future::AsyncAwait'  => 0,
+        'SQL::Translator'     => 0.11018,
+    },
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean => { FILES => 'DBIx-Class-Async-*' },
     (eval { ExtUtils::MakeMaker->VERSION(6.46) } ? (META_MERGE => {
