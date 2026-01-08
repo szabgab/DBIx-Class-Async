@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.19';
+$DBIx::Class::Async::VERSION   = '0.20';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.19
+Version 0.20
 
 =cut
 
@@ -213,7 +213,8 @@ sub new {
     my $cache_ttl = $args{cache_ttl};
     if (defined $cache_ttl) {
         $cache_ttl = undef if $cache_ttl == 0;
-    } else {
+    }
+    else {
         $cache_ttl = DEFAULT_CACHE_TTL;
     }
 
@@ -335,9 +336,9 @@ sub search {
 Executes multiple search queries concurrently.
 
     my @results = await $async_db->search_multi(
-        ['User', { active => 1 }, { rows => 10 }],
+        ['User',    { active => 1 }, { rows => 10 }],
         ['Product', { category => 'books' }],
-        ['Order', undef, { order_by => 'created_at DESC', rows => 5 }],
+        ['Order',   undef, { order_by => 'created_at DESC', rows => 5 }],
     );
 
 Returns: Array of results in the same order as queries.
@@ -533,7 +534,7 @@ Throws an exception if the underlying worker call fails.
     my $result = $db->update_bulk(
         'orders',
         { customer_id => 123, status => 'pending' },
-        { status => 'processed', processed_at => \'NOW()' }
+        { status      => 'processed', processed_at => \'NOW()' }
     );
 
     print "Updated $result rows\n";
@@ -542,7 +543,7 @@ Throws an exception if the underlying worker call fails.
     $db->update_bulk(
         'users',
         { last_login => { '<' => '2023-01-01' } },
-        { active => 0, deactivation_date => \'CURRENT_DATE' }
+        { active     => 0, deactivation_date => \'CURRENT_DATE' }
     );
 
 =back
@@ -693,16 +694,6 @@ If you encounter serialisation errors, consider:
 Common error: C<Found type 13 CODE(...), but it is not representable by the
 Sereal encoding format>
 
-This indicates that your Sereal installation does not support CODE reference
-serialization. You may need to recompile Sereal with:
-
-    perl Makefile.PL --enable-srl-coderef
-    make
-    make install
-
-Alternatively, structure your code to avoid passing CODE references through
-worker boundaries.
-
 =cut
 
 sub txn_do {
@@ -729,7 +720,7 @@ sub txn_do {
         return Future->done($result);
     })->catch(sub {
         my $error = shift;
-        # If it fails due to serialization, provide a better error message
+        # If it fails due to serialisation, provide a better error message
         if ($error =~ /not representable by the Sereal encoding format/) {
             return Future->fail(
                 "txn_do cannot serialise CODE references through IO::Async workers. " .

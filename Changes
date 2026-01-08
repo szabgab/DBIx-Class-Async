@@ -1,5 +1,10 @@
 Revision history for DBIx::Class::Async
 
+0.20  2026-01-08
+      - Updated Makefile.PL w.r.t test requisite thanks Gabor Szabo.
+      - Added CI workflow thanks Gabor Szabo.
+      - Tidied up pod document.
+
 0.19  2026-01-08
       - Added sub search_related[_rs] to DBIx::Class::Async::ResultSet.
 
