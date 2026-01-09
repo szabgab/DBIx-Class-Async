@@ -5,15 +5,15 @@ use warnings;
 
 =head1 NAME
 
-DBIx::Class::Async::TxnGuard - Transaction Guard for DBIx::Class::Async
+DBIx::Class::Async::TxnGuard - Transaction guard for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.20
+Version 0.21
 
 =cut
 
-our $VERSION = '0.20';
+our $VERSION = '0.21';
 
 =head1 SYNOPSIS
 

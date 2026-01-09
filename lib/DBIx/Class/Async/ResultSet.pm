@@ -13,15 +13,15 @@ use DBIx::Class::Async::Cursor;
 
 =head1 NAME
 
-DBIx::Class::Async::ResultSet - Asynchronous ResultSet for DBIx::Class::Async
+DBIx::Class::Async::ResultSet - Asynchronous resultset for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.20
+Version 0.21
 
 =cut
 
-our $VERSION = '0.20';
+our $VERSION = '0.21';
 
 =head1 SYNOPSIS
 
@@ -442,7 +442,7 @@ the newly created row.
 sub create {
     my ($self, $data) = @_;
 
-    # MERGE: Combine the ResultSet's current search condition (which contains the foreign key)
+    # Combine the ResultSet's current search condition (which contains the foreign key)
     # with the new data provided by the user.
     my %to_insert = ( %{$self->{_cond} || {}}, %$data );
 
