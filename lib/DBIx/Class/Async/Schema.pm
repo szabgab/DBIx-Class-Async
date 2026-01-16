@@ -14,7 +14,7 @@ use DBIx::Class::Async::TxnGuard;
 use DBIx::Class::Async::ResultSet;
 use DBIx::Class::Async::Storage::DBI;
 
-our $VERSION = '0.28';
+our $VERSION = '0.29';
 
 =head1 NAME
 
@@ -22,7 +22,7 @@ DBIx::Class::Async::Schema - Asynchronous schema for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.28
+Version 0.29
 
 =cut
 
