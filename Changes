@@ -1,5 +1,8 @@
 Revision history for DBIx::Class::Async
 
+0.31  2026-01-16
+      - Added deploy() to DBIx::Class::Async and DBIx::Class::Async::Schema.
+
 0.30  2026-01-16
       - Added the following methods to DBIx::Class::Async::Schema
         - schema_version
