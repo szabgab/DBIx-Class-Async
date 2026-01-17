@@ -647,6 +647,59 @@ sub id {
     }
 }
 
+=head2 insert
+
+    $row->insert
+        ->then(sub {
+            my ($inserted_row) = @_;
+            # Row has been inserted
+        });
+
+Asynchronously inserts the row into the database.
+
+Note: This method is typically called automatically by L<DBIx::Class::Async/create>.
+For existing rows, it returns an already-resolved Future.
+
+=over 4
+
+=item B<Returns>
+
+A L<Future> that resolves to the row object.
+
+=back
+
+=cut
+
+sub insert {
+    my $self = shift;
+
+    # If the row is already in the database, DBIC behavior is to throw an error
+    # or no-op. Here we follow the safer path.
+    if ($self->in_storage) {
+        return Future->fail("Check failed: count of objects to be inserted is 0 (already in storage)");
+    }
+
+    # update_or_insert handles the actual DB communication and state flipping
+    return $self->update_or_insert;
+}
+
+=head2 insert_or_update
+
+  await $row->insert_or_update;
+
+Arguments: \%fallback_data?
+Return Value: L<Future> resolving to $row
+
+An alias for L</update_or_insert>. Provided for compatibility with
+standard L<DBIx::Class::Row> method naming.
+
+=cut
+
+sub insert_or_update {
+    my $self = shift;
+    return $self->update_or_insert(@_);
+}
+
 =head2 in_storage
 
     if ($row->in_storage) {
@@ -684,42 +737,6 @@ sub in_storage {
     }
 
     return 0;
-}
-
-=head2 insert
-
-    $row->insert
-        ->then(sub {
-            my ($inserted_row) = @_;
-            # Row has been inserted
-        });
-
-Asynchronously inserts the row into the database.
-
-Note: This method is typically called automatically by L<DBIx::Class::Async/create>.
-For existing rows, it returns an already-resolved Future.
-
-=over 4
-
-=item B<Returns>
-
-A L<Future> that resolves to the row object.
-
-=back
-
-=cut
-
-sub insert {
-    my $self = shift;
-
-    # If the row is already in the database, DBIC behavior is to throw an error
-    # or no-op. Here we follow the safer path.
-    if ($self->in_storage) {
-        return Future->fail("Check failed: count of objects to be inserted is 0 (already in storage)");
-    }
-
-    # update_or_insert handles the actual DB communication and state flipping
-    return $self->update_or_insert;
 }
 
 =head2 is_column_changed
@@ -1222,23 +1239,6 @@ sub update_or_insert {
     } else {
         return $async_db->create($source_name, \%to_save)->then($on_success);
     }
-}
-
-=head2 insert_or_update
-
-  await $row->insert_or_update;
-
-Arguments: \%fallback_data?
-Return Value: L<Future> resolving to $row
-
-An alias for L</update_or_insert>. Provided for compatibility with
-standard L<DBIx::Class::Row> method naming.
-
-=cut
-
-sub insert_or_update {
-    my $self = shift;
-    return $self->update_or_insert(@_);
 }
 
 =head1 AUTOLOAD METHODS

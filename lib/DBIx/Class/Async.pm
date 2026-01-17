@@ -261,6 +261,39 @@ sub new {
 
 =head1 METHODS
 
+=head2 count
+
+Counts rows matching conditions.
+
+    my $count = await $async_db->count(
+        $resultset_name,
+        { active => 1, status => 'pending' }  # Optional
+    );
+
+Returns: Integer count.
+
+=cut
+
+sub count {
+    my ($self, $resultset, $search_args) = @_;
+
+    # Allow Hash (standard), Array (OR/AND logic), or ScalarRef (Literal SQL)
+    state $check = compile(Str, Maybe[ HashRef | ArrayRef | ScalarRef ]);
+    $check->($resultset, $search_args);
+
+    $self->{stats}{queries}++;
+    $self->_record_metric('inc', 'db_async_queries_total');
+
+    my $start_time = time;
+
+    return $self->_call_worker('count', $resultset, $search_args)->then(sub {
+        my ($result) = @_;
+        my $duration = time - $start_time;
+        $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
+        return Future->done($result);
+    });
+}
+
 =head2 create
 
 Creates a new row.
@@ -288,39 +321,6 @@ sub create {
     my $start_time = time;
 
     return $self->_call_worker('create', $resultset, $data)->then(sub {
-        my ($result) = @_;
-        my $duration = time - $start_time;
-        $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
-        return Future->done($result);
-    });
-}
-
-=head2 count
-
-Counts rows matching conditions.
-
-    my $count = await $async_db->count(
-        $resultset_name,
-        { active => 1, status => 'pending' }  # Optional
-    );
-
-Returns: Integer count.
-
-=cut
-
-sub count {
-    my ($self, $resultset, $search_args) = @_;
-
-    # Allow Hash (standard), Array (OR/AND logic), or ScalarRef (Literal SQL)
-    state $check = compile(Str, Maybe[ HashRef | ArrayRef | ScalarRef ]);
-    $check->($resultset, $search_args);
-
-    $self->{stats}{queries}++;
-    $self->_record_metric('inc', 'db_async_queries_total');
-
-    my $start_time = time;
-
-    return $self->_call_worker('count', $resultset, $search_args)->then(sub {
         my ($result) = @_;
         my $duration = time - $start_time;
         $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);

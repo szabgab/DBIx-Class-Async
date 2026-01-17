@@ -1530,6 +1530,18 @@ sub search {
     return $clone;
 }
 
+=head2 search_future
+
+    $rs->search_future->then(sub {
+        # Same as all_future, alias for API consistency
+    });
+
+Alias for C<all_future>.
+
+=cut
+
+sub search_future { shift->all_future(@_)  }
+
 =head2 search_literal
 
     my $rs = $schema->resultset('User')->search_literal(
@@ -1688,18 +1700,6 @@ sub single_future {
         return Future->done($row);
     });
 }
-
-=head2 search_future
-
-    $rs->search_future->then(sub {
-        # Same as all_future, alias for API consistency
-    });
-
-Alias for C<all_future>.
-
-=cut
-
-sub search_future { shift->all_future(@_)  }
 
 =head2 slice
 
