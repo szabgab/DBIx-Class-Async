@@ -16,11 +16,11 @@ DBIx::Class::Async::ResultSet - Asynchronous resultset for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.32
+Version 0.33
 
 =cut
 
-our $VERSION = '0.32';
+our $VERSION = '0.33';
 
 =head1 SYNOPSIS
 
@@ -286,8 +286,16 @@ Results are cached internally for use with C<next> and C<reset> methods.
 sub all {
     my $self = shift;
 
-    # 1. Handle prefetched ResultSet
+    # 1. Handle cached or prefetched ResultSet
     if ($self->{is_prefetched} && $self->{entries}) {
+        # If entries are already objects (from set_cache), return them
+        if (ref $self->{entries}[0]
+            && $self->{entries}[0]->isa('DBIx::Class::Async::Row')) {
+            $self->{_rows} = $self->{entries};
+            return Future->done($self->{_rows});
+        }
+
+        # Otherwise, inflate raw entries
         my @rows       = map { $self->new_result($_) } @{$self->{entries}};
         $self->{_rows} = \@rows;
         return Future->done(\@rows);
@@ -303,7 +311,6 @@ sub all {
 
         my @rows = map {
             my $row_data = $_;
-            # new_result now handles in_storage and _dirty correctly
             my $row = $self->new_result($row_data);
 
             # If the hash contains nested data, it's prefetched
@@ -395,6 +402,24 @@ sub as_query {
 
     # This always returns the \[ $sql, @bind ] structure
     return $real_rs->as_query;
+}
+
+=head2 clear_cache
+
+  $rs->clear_cache;
+
+Clears the internal cache of the ResultSet. This forces the next execution
+of the ResultSet to fetch fresh data from the database (or the global
+query cache). Returns C<undef>.
+
+=cut
+
+sub clear_cache {
+    my $self = shift;
+    $self->{_rows}         = undef;
+    $self->{entries}       = undef;
+    $self->{is_prefetched} = 0;
+    return undef;
 }
 
 =head2 count
@@ -991,6 +1016,26 @@ sub get {
     my $self = shift;
     # Returns current cached rows (raw or objects)
     return $self->{_rows} || [];
+}
+
+=head2 get_cache
+
+  my $cached_rows = $rs->get_cache;
+
+Returns the current contents of the ResultSet's internal cache. This will be
+an arrayref of L<DBIx::Class::Async::Row> objects if the cache has been
+populated via C<set_cache> or a previous execution of C<all>. Returns
+C<undef> if no cache exists.
+
+=cut
+
+sub get_cache {
+    my $self = shift;
+
+    # Return the inflated rows if they exist, or the raw entries
+    return $self->{_rows}   if $self->{_rows};
+    return $self->{entries} if $self->{entries};
+    return undef;
 }
 
 =head2 get_column
@@ -1611,6 +1656,38 @@ sub search_related_rs {
     return $self->_do_search_related(@_);
 }
 
+=head2 set_cache
+
+  $rs->set_cache(\@row_objects);
+
+Manually populates the ResultSet cache with the provided arrayref of row objects.
+Once a cache is set, any subsequent data-fetching operations (like C<all> or
+C<single_future>) will return the cached objects immediately instead of
+querying the database or the global worker cache.
+
+Expects an arrayref of objects of the same class as those normally produced
+by the ResultSet.
+
+=cut
+
+sub set_cache {
+    my ($self, $cache) = @_;
+
+    if (defined $cache && ref $cache ne 'ARRAY') {
+        croak("set_cache expects an arrayref of objects");
+    }
+
+    # Standard DBIC behavior: setting cache populates the result list
+    $self->{_rows}         = $cache;
+    $self->{is_prefetched} = 1;
+
+    # Also store as raw entries if these are objects,
+    # ensuring compatibility with your current 'all' logic
+    $self->{entries} = $cache;
+
+    return $cache;
+}
+
 =head2 single
 
     my $row = $rs->single;
@@ -1997,6 +2074,21 @@ Example:
 
 These methods do not modify the original result set and do not execute any
 database queries.
+
+=head1 CACHING METHODS
+
+These methods allow for manual management of the ResultSet's internal data cache.
+Note that this is separate from the global query cache managed by the L<DBIx::Class::Async> object.
+
+=over 4
+
+=item get_cache
+
+=item set_cache
+
+=item clear_cache
+
+=back
 
 =head1 INTERNAL METHODS
 
