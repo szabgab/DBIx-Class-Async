@@ -19,6 +19,7 @@ WriteMakefile(
         'CHI'                 => 0,
         'Carp'                => 0,
         'Try::Tiny'           => 0,
+        'Data::Page'          => 0,
         'Metrics::Any'        => 0,
         'Future'              => 0,
         'IO::Async::Loop'     => 0,
@@ -52,6 +53,10 @@ WriteMakefile(
             'DBIx::Class::Async::ResultSet' => {
                 file    => 'lib/DBIx/Class/Async/ResultSet.pm',
                 version => MM->parse_version('lib/DBIx/Class/Async/ResultSet.pm')
+            },
+            'DBIx::Class::Async::ResultSet::Pager' => {
+                file    => 'lib/DBIx/Class/Async/ResultSet/Pager.pm',
+                version => MM->parse_version('lib/DBIx/Class/Async/ResultSet/Pager.pm')
             },
             'DBIx::Class::Async::Row' => {
                 file    => 'lib/DBIx/Class/Async/Row.pm',

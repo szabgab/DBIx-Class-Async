@@ -1,5 +1,14 @@
 Revision history for DBIx::Class::Async
 
+0.38  2026-01-18
+      - Added new package DBIx::Class::Async::ResultSet::Pager.
+      - Added the following methods to DBIx::Class::Async::ResultSet.
+        - count_total
+        - is_paged
+        - page
+        - pager
+        - search_with_pager
+
 0.37  2026-01-18
       - Documented the removal of support for txn_scope_guard() in DBIx::Class::Async::Schema.
 
