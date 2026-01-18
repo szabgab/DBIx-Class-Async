@@ -2,7 +2,7 @@
 
 use strict;
 use warnings;
-use Test::More tests => 8;
+use Test::More tests => 7;
 
 BEGIN {
     use_ok('DBIx::Class::Async')                       || print "Bail out!\n";
@@ -12,7 +12,6 @@ BEGIN {
     use_ok('DBIx::Class::Async::Storage')              || print "Bail out!\n";
     use_ok('DBIx::Class::Async::Storage::DBI')         || print "Bail out!\n";
     use_ok('DBIx::Class::Async::Storage::DBI::Cursor') || print "Bail out!\n";
-    use_ok('DBIx::Class::Async::TxnGuard')             || print "Bail out!\n";
 }
 
 diag( "Testing DBIx::Class::Async $DBIx::Class::Async::VERSION, Perl $], $^X" );

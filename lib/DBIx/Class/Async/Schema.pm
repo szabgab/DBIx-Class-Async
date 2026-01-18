@@ -10,11 +10,10 @@ use Try::Tiny;
 use Scalar::Util 'blessed';
 use DBIx::Class::Async;
 use DBIx::Class::Async::Storage;
-use DBIx::Class::Async::TxnGuard;
 use DBIx::Class::Async::ResultSet;
 use DBIx::Class::Async::Storage::DBI;
 
-our $VERSION = '0.36';
+our $VERSION = '0.37';
 
 =head1 NAME
 
@@ -22,7 +21,7 @@ DBIx::Class::Async::Schema - Asynchronous schema for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.36
+Version 0.37
 
 =cut
 
@@ -823,37 +822,6 @@ sub txn_do {
     return $self->{async_db}->txn_do($code);
 }
 
-=head2 txn_scope_guard
-
-    my $guard = $schema->txn_scope_guard;
-    # Perform async operations
-    $guard->commit;  # or rolls back if $guard goes out of scope
-
-Returns a transaction scope guard for manual transaction management.
-
-=over 4
-
-=item B<Returns>
-
-A L<DBIx::Class::Async::TxnGuard> object.
-
-=item B<Notes>
-
-If the guard object goes out of scope without an explicit C<commit>,
-the transaction will be rolled back automatically.
-
-=back
-
-=cut
-
-sub txn_scope_guard {
-    my $self = shift;
-
-    return DBIx::Class::Async::TxnGuard->new(
-        schema => $self,
-    );
-}
-
 =head2 unregister_source
 
     $schema->unregister_source($source_name);
@@ -998,7 +966,75 @@ The hydration logic is recursive. You can prefetch multiple levels of relationsh
 
 =back
 
-=cut
+=head1 ARCHITECTURAL NOTE: The removal of txn_scope_guard
+
+In C<DBIx::Class::Async>, the traditional C<txn_scope_guard> pattern has been
+intentionally removed. While this pattern is a staple of synchronous
+L<DBIx::Class> development, it is fundamentally incompatible with an
+asynchronous, worker-pool architecture.
+
+The following analysis explains the technical limitations that led to this
+decision.
+
+=head2 1. The Scope vs. Execution Race Condition
+
+In a synchronous environment, a scope guard works because the program pauses
+until every line inside the block completes. The C<DESTROY> method (which
+triggers an automatic rollback) only fires after all work is done.
+
+In an asynchronous environment, the block often finishes execution and
+destroys the guard while the database requests are still in flight.
+
+  {
+      my $guard = $schema->txn_scope_guard;
+      $schema->resultset('User')->create({ name => 'Bob' });
+      # Request is sent to the worker; a Future is returned immediately.
+  }
+  # 1. The block ends here.
+  # 2. $guard is destroyed, triggering an immediate ROLLBACK command.
+  # 3. The ROLLBACK may arrive at the worker before the 'create' is processed.
+
+This results in a "Silent Failure" where the application receives a success
+notification from the L<Future>, but the data is never committed to the disk.
+
+=head2 2. Worker Affinity and Statelessness
+
+C<DBIx::Class::Async> utilises a pool of background worker processes to
+achieve concurrency. Transactions are inherently "stateful" - a database
+handle must remain assigned to a specific transaction until it is finished.
+
+=over 4
+
+=item * B<The Affinity Problem:> Without pinning a user session to a
+specific worker, Operation A might go to Worker 1, while Operation B goes
+to Worker 2. Worker 2 has no context regarding the transaction started
+on Worker 1.
+
+=item * B<Worker Starvation:> To support a Scope Guard, a worker would have
+to "lock" itself to a single caller and refuse all other work until a
+C<commit> or C<rollback> is received. In a high-concurrency environment, a
+few unclosed guards could easily exhaust the worker pool, causing the
+entire application to hang.
+
+=back
+
+=head2 3. The Recommended Alternative: txn_batch
+
+To provide the same atomicity and safety as a transaction guard without the
+architectural risks, use the L</txn_batch> method.
+
+C<txn_batch> packages all operations into a single atomic message sent to
+a single worker. The worker opens the transaction, executes all queries,
+and commits the results before returning the handle to the pool.
+
+=head2 4. Comparison at a Glance
+
+    Feature            | txn_scope_guard   | txn_batch
+    -------------------|-------------------|------------------
+    Execution          | Non-deterministic | Atomic / Single-hop
+    Worker Logic       | Stateful (Risky)  | Stateless (Safe)
+    Cleanup            | Perl DESTROY      | Internal Worker Logic
+    Race Conditions    | High Risk         | None
 
 =head1 SEE ALSO
 

@@ -73,10 +73,6 @@ WriteMakefile(
                 file    => 'lib/DBIx/Class/Async/Storage/DBI/Cursor.pm',
                 version => MM->parse_version('lib/DBIx/Class/Async/Storage/DBI/Cursor.pm')
             },
-            'DBIx::Class::Async::TxnGuard' => {
-                file    => 'lib/DBIx/Class/Async/TxnGuard.pm',
-                version => MM->parse_version('lib/DBIx/Class/Async/TxnGuard.pm')
-            },
         },
         resources => {
             repository => {

@@ -1,5 +1,8 @@
 Revision history for DBIx::Class::Async
 
+0.37  2026-01-18
+      - Documented the removal of support for txn_scope_guard() in DBIx::Class::Async::Schema.
+
 0.36  2026-01-18
       - Added sub txn_batch() to DBIx::Class::Async::Schema.
       - Updated DBIx::Class::Async::Schema::deploy() to return Future.
