@@ -1,8 +1,11 @@
 Revision history for DBIx::Class::Async
 
+0.39  2026-01-18
+      - Added sub is_ordered() to DBIx::Class::Async::ResultSet.
+
 0.38  2026-01-18
       - Added new package DBIx::Class::Async::ResultSet::Pager.
-      - Added the following methods to DBIx::Class::Async::ResultSet.
+      - Added the following subs to DBIx::Class::Async::ResultSet.
         - count_total
         - is_paged
         - page

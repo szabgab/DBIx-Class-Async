@@ -1,3 +1,5 @@
+#!/usr/bin/env perl
+
 use strict;
 use warnings;
 use Test::More;
@@ -5,8 +7,8 @@ use File::Temp qw(tempfile);
 use lib 'lib', 't/lib';
 
 use TestSchema;
-use DBIx::Class::Async::Schema;
 use IO::Async::Loop;
+use DBIx::Class::Async::Schema;
 
 # 1. Setup Database
 my (undef, $db_file) = tempfile(UNLINK => 1);
@@ -43,16 +45,17 @@ subtest "ResultSet count vs count_total" => sub {
 };
 
 subtest "Full Pager Integration" => sub {
-    my $rs = $async_schema->resultset('User')->page(3); # Page 3 of 10-row pages
+    # 1. Test the logic with an unordered RS
+    my $rs = $async_schema->resultset('User')->page(3);
     my $pager = $rs->pager;
 
     is($pager->current_page, 3, "Pager on correct page");
 
-    # Trigger the async count_total via the pager
-    my $total = $pager->total_entries->get;
-    is($total, 25, "Pager total_entries is correct");
+    # 2. Verify total entries logic
+    my $total_f = $pager->total_entries;
+    is($total_f->get, 25, "Pager total_entries is correct");
 
-    # Test Data::Page calculations (synchronous)
+    # 3. Verify pagination math
     is($pager->last_page, 3, "Last page is 3 (10+10+5)");
     is($pager->entries_on_this_page, 5, "Entries on page 3 is 5");
     ok($pager->previous_page, "Has a previous page");
@@ -74,4 +77,12 @@ subtest "Search with Pager (Parallel)" => sub {
     is($pager->current_page, 2, "Pager correctly reports page 2");
 };
 
-done_testing();
+subtest "Ordering Check" => sub {
+    my $rs = $async_schema->resultset('User');
+    ok( !$rs->is_ordered, "New resultset is not ordered" );
+
+    my $ordered_rs = $rs->search(undef, { order_by => { -desc => 'created_at' } });
+    ok( $ordered_rs->is_ordered, "Resultset with order_by returns true for is_ordered" );
+};
+
+done_testing;

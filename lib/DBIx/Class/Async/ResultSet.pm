@@ -16,11 +16,11 @@ DBIx::Class::Async::ResultSet - Asynchronous resultset for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.38
+Version 0.39
 
 =cut
 
-our $VERSION = '0.38';
+our $VERSION = '0.39';
 
 =head1 SYNOPSIS
 
@@ -180,7 +180,7 @@ A core inflation method that transforms a raw hash of database results into a
 fully-functional row object. Unlike standard inflation, this method is
 architected for the asynchronous, disconnected nature of background workers.
 
-=head3 Features
+B<Features>
 
 =over 4
 
@@ -1211,6 +1211,22 @@ sub is_paged {
     return exists $self->{_attrs}->{page} ? 1 : 0;
 }
 
+=head2 is_ordered
+
+    my $bool = $rs->is_ordered;
+
+Returns B<true> (1) if the ResultSet has an C<order_by> attribute set, B<false> (0)
+otherwise. It is highly recommended to ensure a ResultSet B<is_ordered> before
+performing pagination to ensure consistent results across pages.
+
+=cut
+
+sub is_ordered {
+    my $self = shift;
+
+    return exists $self->{_attrs}->{order_by} ? 1 : 0;
+}
+
 =head2 next
 
     while (my $row = $rs->next) {
@@ -1284,6 +1300,8 @@ next/previous page numbers, and entry counts.
 B<Note:> This method will C<die> if called on a ResultSet that has not been
 paged via the L</page> method.
 
+B<PRO-TIP>: Warn the user if they are paginating unordered data.
+
 =cut
 
 sub pager {
@@ -1291,6 +1309,12 @@ sub pager {
 
     unless ($self->is_paged) {
         die "Cannot call ->pager on a non-paged resultset. Call ->page(\$n) first.";
+    }
+
+    # Warn only if unordered AND not running in a test suite
+    if (!$self->is_ordered && !$ENV{HARNESS_ACTIVE}) {
+        warn "DBIx::Class::Async Warning: Calling ->pager on an unordered ResultSet. " .
+             "Results may be inconsistent across pages.\n";
     }
 
     require DBIx::Class::Async::ResultSet::Pager;

@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.38';
+$DBIx::Class::Async::VERSION   = '0.39';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.38
+Version 0.39
 
 =cut
 
