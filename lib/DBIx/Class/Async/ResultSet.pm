@@ -16,11 +16,11 @@ DBIx::Class::Async::ResultSet - Asynchronous resultset for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.33
+Version 0.34
 
 =cut
 
-our $VERSION = '0.33';
+our $VERSION = '0.34';
 
 =head1 SYNOPSIS
 
@@ -76,6 +76,34 @@ asynchronous database access.
 This class supports both synchronous-style iteration (using C<next> and C<reset>)
 and asynchronous operations (using C<then> callbacks). All database operations
 are delegated to the underlying L<DBIx::Class::Async> instance.
+
+=head1 ARCHITECTURAL ROLE
+
+In a standard DBIC environment, the ResultSet holds a live database handle. In
+the C<Async> environment, the "real" ResultSet lives in a background worker.
+This class exists on the application side to provide:
+
+=over 4
+
+=item B<Lazy Inflation>
+
+Results are not turned into objects until they are actually needed. This saves
+CPU cycles if you are only passing data through to a JSON encoder.
+
+=item B<Relationship Stitching>
+
+When C<search_with_prefetch> is used, the worker sends back a nested data structure.
+This class's C<new_result> method is responsible for "stitching" that data back
+together so that C<< $user->orders >> returns the prefetched collection without
+triggering new database queries.
+
+=item B<Dynamic Class Hijacking>
+
+This class uses an anonymous proxy pattern to ensure that if a user requests a
+custom C<result_class>, the resulting objects inherit correctly from both the
+Async framework and the user's custom class.
+
+=back
 
 =head1 CONSTRUCTOR
 
@@ -146,17 +174,42 @@ sub new {
 
 =head2 new_result
 
-  my $row = $rs->new_result($hashref);
+    my $row = $rs->new_result($hashref);
 
-A helper method that inflates a raw hash of database columns into a blessed Row object.
+A core inflation method that transforms a raw hash of database results into a
+fully-functional row object. Unlike standard inflation, this method is
+architected for the asynchronous, disconnected nature of background workers.
 
-It dynamically generates a specialised subclass under the C<DBIx::Class::Async::Row::*>
-namespace based on the C<source_name> of the current ResultSet. This allows for
-cleaner method resolution and avoids namespace pollution across different tables.
+=head3 Features
 
-The returned object will be an instance of a class that inherits from
-L<DBIx::Class::Async::Row>.
+=over 4
 
+=item * B<Dynamic Subclassing>:
+
+Generates a specialised class (e.g., C<DBIx::Class::Async::Row::User>) per
+ResultSource to ensure clean method resolution.
+
+=item * B<Custom Class Support>:
+
+If a C<result_class> is set, it dynamically creates an anonymous proxy
+(C<...::Anon::*>) that uses multiple inheritance to combine your custom
+methods with the asynchronous row logic.
+
+=item * B<Deep Inflation (Prefetch)>:
+
+Detects nested data structures (hashes or arrays) in the input and injects
+them into the object's internal relationship cache, allowing for
+non-blocking access to related data.
+
+=item * B<Data Normalization>:
+
+Handles SQL aliases (like C<me.id>), primary key detection for storage state,
+and preserves literal SQL columns (like C<COUNT(*)>) that may not exist
+in the schema.
+
+=back
+
+Returns a blessed object inheriting from L<DBIx::Class::Async::Row>.
 Returns C<undef> if the provided data is empty or undefined.
 
 =cut
@@ -164,10 +217,11 @@ Returns C<undef> if the provided data is empty or undefined.
 sub new_result {
     my ($self, $data) = @_;
 
-    my $row_class = "DBIx::Class::Async::Row::" . $self->{source_name};
+    # 1. Start with the standard Async Row class
+    my $source_name = $self->{source_name};
+    my $row_class   = "DBIx::Class::Async::Row::$source_name";
 
-    # 1. Setup inheritance ONLY (Keep this part!)
-    # We need to ensure the specific Row class inherits from the base Async::Row
+    # Ensure the base Async Row class exists
     {
         no strict 'refs';
         unless (@{"${row_class}::ISA"}) {
@@ -187,39 +241,69 @@ sub new_result {
         $is_in_storage = 1;
     }
 
-    # 3. Data Normalization
+    # 3. Data Normalization (Keeping the working Prefetch & Count fixes)
     my %clean_data;
+    my %rel_data;
 
-    # Get official columns PLUS any virtual aliases (like 'count')
-    my @expected_cols = $source->columns;
-    if (my $as = $self->{_attrs}->{as}) {
-        push @expected_cols, @$as;
+    my %expected = map { lc($_) => $_ } $source->columns;
+    if (my $as = $self->{attrs}->{as}) {
+        my @as_list = ref $as eq 'ARRAY' ? @$as : ($as);
+        $expected{lc($_)} = $_ for @as_list;
     }
 
-    foreach my $col (@expected_cols) {
-        # Search $data for exact name, prefixed (me.col), or case-insensitive match
-        my ($match) = grep {
-            lc($_) eq lc($col) || $_ =~ /\.\Q$col\E$/i
-        } keys %$data;
+    foreach my $key (keys %$data) {
+        my $clean_key = $key;
+        $clean_key    =~ s/^me\.//i;
 
-        if (defined $match) {
-            $clean_data{$col} = $data->{$match};
+        if (ref $data->{$key} eq 'HASH' || ref $data->{$key} eq 'ARRAY') {
+            $rel_data{$key} = $data->{$key};
+        }
+        elsif (exists $expected{lc($clean_key)}) {
+            $clean_data{$expected{lc($clean_key)}} = $data->{$key};
+        }
+        else {
+            # Keep literal counts/aliases
+            $clean_data{$key} = $data->{$key};
         }
     }
 
     # 4. Instantiate the Row
-    # Row->new calls _ensure_accessors, so the methods are created there!
     my $row = $row_class->new(
         schema      => $self->{schema},
         async_db    => $self->{async_db},
-        source_name => $self->{source_name},
+        source_name => $source_name,
         row_data    => \%clean_data,
         in_storage  => $is_in_storage,
     );
 
-    # 5. Finalize state
+    # 5. Handle Custom Result Class Overrides
+    my $target_class = $self->result_class;
+
+    # If the target class isn't our standard generated one, we must rebless
+    if ($target_class ne $row_class
+        && $target_class ne $self->result_source->result_class) {
+        my $anon_class = "${row_class}::WITH::" . $target_class;
+        $anon_class =~ s/::/_/g;
+        $anon_class = "DBIx::Class::Async::Anon::$anon_class";
+
+        no strict 'refs';
+        unless (@{"${anon_class}::ISA"}) {
+            # Load the custom class if needed
+            eval "require $target_class" unless $target_class->can('new');
+
+            # The order ensures Async::Row methods take precedence over custom ones
+            @{"${anon_class}::ISA"} = ($row_class, $target_class);
+        }
+        bless $row, $anon_class;
+    }
+
+    # 6. Finalize state
     $row->{_dirty} = {} if $is_in_storage;
     $row->{_data}  = \%clean_data;
+
+    if (keys %rel_data) {
+        $row->{_relationship_data} = \%rel_data;
+    }
 
     return $row;
 }
@@ -1443,6 +1527,58 @@ sub reset {
     my $self = shift;
     $self->{_pos} = 0;
     return $self;
+}
+
+=head2 result_class
+
+    $rs->result_class('My::Custom::Row::Class');
+    my $class = $rs->result_class;
+
+Gets or sets the result class (inflation class) for the ResultSet.
+
+In C<DBIx::Class::Async>, this method plays a critical role in maintaining
+Object-Oriented compatibility. When a custom result class is specified,
+the library automatically generates an anonymous proxy class that inherits
+from both the internal asynchronous logic and your custom class.
+
+This ensures that:
+
+=over 4
+
+=item 1. Custom row methods (e.g., C<hello_name>) are available on returned objects.
+
+=item 2. The objects correctly pass C<< $row->isa('My::Custom::Row::Class') >> checks.
+
+=item 3. Database interactions remain asynchronous and non-blocking.
+
+=back
+
+The method resolves the class using the following priority:
+
+=over 4
+
+=item 1. Explicitly set value via this accessor.
+
+=item 2. Attributes passed during the C<search> call (C<result_class>).
+
+=item 3. The default C<result_class> defined in the L<DBIx::Class::ResultSource>.
+
+=back
+
+Returns the ResultSet object when used as a setter to allow method chaining.
+
+=cut
+
+sub result_class {
+    my $self = shift;
+    if (@_) {
+        $self->{attrs}->{result_class} = shift;
+        return $self;
+    }
+    # Priority: 1. Manual override, 2. ResultSet attributes, 3. Source default
+    return $self->{attrs}->{result_class}
+        || $self->{_attrs}->{result_class}
+        || $self->result_source->result_class;
 }
 
 =head2 result_source

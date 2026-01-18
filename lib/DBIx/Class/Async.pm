@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.33';
+$DBIx::Class::Async::VERSION   = '0.34';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.33
+Version 0.34
 
 =cut
 
@@ -683,6 +683,68 @@ sub search_multi {
     });
 }
 
+=head2 search_with_prefetch
+
+    my $future = $async_db->search_with_prefetch(
+        $source_name,
+        \%condition,
+        $prefetch_spec,
+        \%extra_attributes
+    );
+
+Performs an asynchronous search while eager-loading related data. This method
+is specifically designed to solve the "N+1 query" problem in an asynchronous
+environment.
+
+Arguments:
+
+=over 4
+
+=item * C<$source_name>: The name of the ResultSource (e.g., 'User').
+
+=item * C<\%condition>: A standard C<DBIx::Class> search condition.
+
+=item * C<$prefetch_spec>: A standard C<prefetch> attribute (string, arrayref, or hashref).
+
+=item * C<\%extra_attributes>: Optional search attributes (order_by, rows, etc.).
+
+=back
+
+This method performs "Deep Serialiisation." Since C<DBIx::Class> row objects
+contain live database handles that cannot be sent across process boundaries,
+this method ensures that the background worker:
+
+=over 4
+
+=item 1. Executes the join and B<collapses> the result set to avoid duplicate parent rows.
+
+=item 2. Recursively converts the nested object tree into a transportable data structure.
+
+=item 3. Transports the data to the parent process where it is re-inflated into
+L<DBIx::Class::Async::Row> objects, with the relationship data accessible
+via standard accessors.
+
+=back
+
+B<Note:> Unlike standard C<DBIx::Class>, accessing a relationship that was
+B<not> prefetched will fail, as the result row does not have a persistent
+connection to the database in the parent process.
+
+=cut
+
+sub search_with_prefetch {
+    my ($self, $source_name, $cond, $prefetch, $attrs) = @_;
+    $attrs ||= {};
+
+    # We force these into the attributes so execute_operation sees them
+    $attrs->{prefetch} = $prefetch;
+    $attrs->{collapse} = 1;
+
+    # We call our existing async search, which eventually
+    # triggers execute_operation in the worker
+    return $self->search($source_name, $cond, $attrs);
+}
+
 =head2 stats
 
 Returns statistics about database operations.
@@ -1233,13 +1295,15 @@ sub _serialise_row_with_prefetch {
                 my $related = eval { $row->$rel };
                 next if $@ || !defined $related;
 
-                if (ref($related) eq 'DBIx::Class::ResultSet' || $related->isa('DBIx::Class::ResultSet')) {
+                if (ref($related) eq 'DBIx::Class::ResultSet' || eval { $related->isa('DBIx::Class::ResultSet') }) {
                     # has_many relationship
+                    # Only call ->all if we are sure we want to fetch/serialise these
+                    my @items = $related->all;
                     $data{$rel} = [
-                        map { _serialise_row_with_prefetch($_, $spec->{$rel}) } $related->all
+                        map { _serialise_row_with_prefetch($_, $spec->{$rel}) } @items
                     ];
-                } else {
-                    # belongs_to / might_have relationship
+                } elsif (eval { $related->isa('DBIx::Class::Row') }) {
+                    # single relationship (belongs_to / might_have)
                     $data{$rel} = _serialise_row_with_prefetch($related, $spec->{$rel});
                 }
             }
@@ -1261,15 +1325,26 @@ sub _normalise_prefetch {
 sub _execute_operation {
     my ($schema, $operation, @args) = @_;
 
-   if ($operation eq 'search') {
+    if ($operation eq 'search') {
         my ($resultset, $search_args, $attrs) = @args;
 
         my $results = eval {
             my $rs = $schema->resultset($resultset);
+
+            # Use collapse if prefetch is present to avoid duplicate parent rows
+            if ($attrs->{prefetch}) {
+                $attrs->{collapse} = 1;
+            }
+
             $rs = $rs->search($search_args || {}, $attrs || {});
             my @rows = $rs->all;
 
-            # Map rows to deep hashes if prefetch is active
+            # 1. If user used HashRefInflator, rows are already plain hashes
+            if (($attrs->{result_class} || '') =~ /HashRefInflator/) {
+                return [ map { { %$_, _in_storage => 1 } } @rows ];
+            }
+
+            # 2. Otherwise, we must recursively turn Objects into Nested Hashes
             my @results = map {
                 _serialise_row_with_prefetch($_, $attrs->{prefetch})
             } @rows;
