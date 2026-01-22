@@ -1,5 +1,25 @@
 Revision history for DBIx::Class::Async
 
+0.46 2026-01-22
+     - [DOCS] Major documentation overhaul across the entire distribution.
+     - [DOCS] Modernised SYNOPSIS for all core packages to utilise Future-based
+       chaining (->then/->catch) instead of legacy blocking patterns:
+        * DBIx::Class::Async
+        * DBIx::Class::Async::Schema
+        * DBIx::Class::Async::ResultSet
+        * DBIx::Class::Async::Row
+        * DBIx::Class::Async::Storage
+        * DBIx::Class::Async::Storage::DBI
+        * DBIx::Class::Async::Storage::DBI::Cursor
+        * DBIx::Class::Async::Pager
+        * DBIx::Class::Async::ResultComponent
+     - [DOCS] Added practical examples for high-concurrency operations, including
+       race-condition safe find_or_create and update_or_create.
+     - [DOCS] Documented the "Smart Discovery" logic for unique constraints.
+     - [DOCS] Improved technical clarity regarding synchronous metadata vs.
+       asynchronous data retrieval in Pager and Row objects.
+     - [DOCS] Demonstrated standard async patterns for recursive cursor iteration.
+
 0.45 2026-01-22
      - [REFACTOR] Extracted unique constraint discovery into internal helper
        _extract_unique_lookup to unify logic across ResultSet operations.
@@ -7,17 +27,17 @@ Revision history for DBIx::Class::Async
        improving search accuracy.
      - [FIX] Enhanced find_or_new to correctly strip "me." prefixes from
        ResultSet conditions when instantiating new result objects.
-     - [FIX] Cleaned up find_or_create logic by utilizing the new lookup
+     - [FIX] Cleaned up find_or_create logic by utilising the new lookup
        helper and streamlining the race-condition recovery path.
      - [DOCS] Added POD documentation for internal _extract_unique_lookup method.
-     - [FIX] Refactored update_or_create to utilize _extract_unique_lookup and
+     - [FIX] Refactored update_or_create to utilise _extract_unique_lookup and
       implement atomic race-condition recovery.
     - [FIX] Corrected update_or_new behavior to properly return a volatile
       new_result object instead of persisting via create() on find failure.
-    - [IMPROVEMENT] Standardized prefix stripping (me/self/foreign) in
+    - [IMPROVEMENT] Standardised prefix stripping (me/self/foreign) in
       update_or_new to prevent invalid column crashes on filtered ResultSets.
     - [REFACTOR] Streamlined identity discovery across all upsert-style
-      methods to ensure consistent unique key prioritization.
+      methods to ensure consistent unique key prioritisation.
 
 0.44 2026-01-22
      - [FEATURE] Refactor find_or_create to be race-condition safe in

@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.45';
+$DBIx::Class::Async::VERSION   = '0.46';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.45
+Version 0.46
 
 =cut
 
@@ -53,37 +53,43 @@ You are encouraged to try and share your suggestions.
     use DBIx::Class::Async;
 
     my $loop = IO::Async::Loop->new;
-    my $db   = DBIx::Class::Async->new(
+
+    # Initialise the Async bridge
+    my $db = DBIx::Class::Async->new(
         schema_class => 'MyApp::Schema',
-        connect_info => [
-            'dbi:SQLite:dbname=my.db',
-            undef,
-            undef,
-            { sqlite_unicode => 1 },
-        ],
-        workers   => 2,
-        cache_ttl => 60,
-        loop      => $loop,
+        connect_info => [ 'dbi:SQLite:dbname=my.db', '', '' ],
+        workers      => 4,
+        loop         => $loop,
     );
 
-    my $f = $db->search('User', { active => 1 });
+    # Access a ResultSet bridge
+    my $rs = $db->resultset('User');
 
-    $f->on_done(sub {
-        my ($rows) = @_;
-        for my $row (@$rows) {
-            say $row->{name};
-        }
+    # 1. High-level Atomic Operations (Race-condition safe)
+    $rs->find_or_create({
+        email => 'john@example.com',
+        name  => 'John'
+    })->then(sub {
+        my $user = shift;
+        say "Found or created user: " . $user->name;
+
+        # 2. Chained async updates
+        return $user->update({ last_login => time });
+    })->then(sub {
+        # 3. Complex searching with Future results
+        return $rs->search({ active => 1 })->all;
+    })->then(sub {
+        my @users = @_;
+        say "Active users: " . scalar @users;
         $loop->stop;
-    });
-
-    $f->on_fail(sub {
-        warn "Query failed: @_";
+        return Future->done;
+    })->catch(sub {
+        my $error = shift;
+        warn "Database error occurred: $error";
         $loop->stop;
     });
 
     $loop->run;
-
-    $db->disconnect;
 
 =head1 DESCRIPTION
 

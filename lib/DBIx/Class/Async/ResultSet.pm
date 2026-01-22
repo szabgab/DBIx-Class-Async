@@ -16,54 +16,64 @@ DBIx::Class::Async::ResultSet - Asynchronous resultset for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.45
+Version 0.46
 
 =cut
 
-our $VERSION = '0.45';
+our $VERSION = '0.46';
 
 =head1 SYNOPSIS
 
-    use DBIx::Class::Async::ResultSet;
+    # Typically obtained via the DBIx::Class::Async bridge
+    my $rs = $async_db->resultset('User');
 
-    # Typically obtained from DBIx::Class::Async::Schema
-    my $rs = $schema->resultset('User');
+    # Data Retrieval (All return Future objects)
 
-    # Synchronous methods (return Future objects)
-    $rs->all->then(sub {
-        my ($users) = @_;
-        foreach my $user (@$users) {
-            say "User: " . $user->name;
-        }
-    });
-
-    $rs->search({ active => 1 })->count->then(sub {
-        my ($count) = @_;
-        say "Active users: $count";
-    });
-
-    # Asynchronous future methods
-    $rs->all_future->then(sub {
-        my ($data) = @_;
-        # Raw data arrayref
-    });
-
-    # Chaining methods
-    $rs->search({ status => 'active' })
-       ->order_by('created_at')
+    # Simple retrieval with chaining
+    $rs->search({ active => 1 })
+       ->order_by({ -desc => 'created_at' })
        ->rows(10)
-       ->all->then(sub {
-           my ($active_users) = @_;
-           # Process results
+       ->all
+       ->then(sub {
+           my @users = @_; # Inflated Row objects
+           say "Found " . scalar(@users) . " active users";
+           return Future->done;
        });
 
-    # Create new records
-    $rs->create({
-        name  => 'Alice',
+    # Aggregates
+    $rs->count->then(sub {
+        my $count = shift;
+        say "Total users: $count";
+    });
+
+    # Persistence & Concurrency-Safe Operations
+
+    # find_or_create handles race conditions automatically
+    $rs->find_or_create({
         email => 'alice@example.com',
+        name  => 'Alice'
     })->then(sub {
-        my ($new_user) = @_;
-        say "Created user ID: " . $new_user->id;
+        my $user = shift;
+        say "User retrieved/created with ID: " . $user->id;
+    });
+
+    # update_or_create performs an atomic upsert
+    $rs->update_or_create({
+        email => 'alice@example.com',
+        name  => 'Alice Revised'
+    })->then(sub {
+        my $updated_user = shift;
+        say "User profile synchronized.";
+    });
+
+    # Raw Data Access
+
+    # all_future returns a raw arrayref of hashrefs (faster for large sets)
+    $rs->search({ status => 'archived' })->all_future->then(sub {
+        my $raw_data = shift;
+        foreach my $row (@$raw_data) {
+            say "Archived: $row->{email}";
+        }
     });
 
 =head1 DESCRIPTION
