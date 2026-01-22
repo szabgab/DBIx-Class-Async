@@ -1,5 +1,22 @@
 Revision history for DBIx::Class::Async
 
+0.47 2026-01-22
+     - [REFACTOR] Overhauled Row state management to use authoritative
+       'in_storage' flags instead of guessing based on Primary Key presence.
+     - [FIX] Resolved "Cannot update row: not in storage" errors in
+       complex workflows by propagating storage state through recursive
+       relationship inflation.
+     - [REFACTOR] Centralized row inflation logic into Async.pm bridge to
+       ensure consistent object creation across all ResultSet fetch paths.
+     - [FIX] Updated find_or_new to correctly distinguish between persistent
+       and transient objects.
+     - [IMPROVE] Hardened Row and ResultSet against Mock objects in test
+       suites by adding defensive metadata checks (can('columns')).
+     - [OPTIMIZE] Improved search performance by only generating cache
+       keys when caching is explicitly enabled.
+     - [FIX] Ensure single-column primary keys are correctly merged during
+       create() operations across all bridge drivers.
+
 0.46 2026-01-22
      - [DOCS] Major documentation overhaul across the entire distribution.
      - [DOCS] Modernised SYNOPSIS for all core packages to utilise Future-based

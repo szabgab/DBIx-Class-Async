@@ -16,11 +16,11 @@ DBIx::Class::Async::ResultSet - Asynchronous resultset for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.46
+Version 0.47
 
 =cut
 
-our $VERSION = '0.46';
+our $VERSION = '0.47';
 
 =head1 SYNOPSIS
 
@@ -225,94 +225,52 @@ Returns C<undef> if the provided data is empty or undefined.
 =cut
 
 sub new_result {
-    my ($self, $data) = @_;
+    my ($self, $data, $attrs) = @_;
+    return undef unless defined $data;
 
-    # 1. Start with the standard Async Row class
-    my $source_name = $self->{source_name};
-    my $row_class   = "DBIx::Class::Async::Row::$source_name";
+    # Extract storage hint from attributes hashref
+    my $storage_hint = (ref $attrs eq 'HASH') ? $attrs->{in_storage} : undef;
 
-    # Ensure the base Async Row class exists
-    {
-        no strict 'refs';
-        unless (@{"${row_class}::ISA"}) {
-            @{"${row_class}::ISA"} = ('DBIx::Class::Async::Row');
-        }
+    # 1. Delegate to the Async bridge if it's available and capable
+    my $row;
+    if ($self->{async_db} && $self->{async_db}->can('_inflate_row')) {
+        $row = $self->{async_db}->_inflate_row(
+            $self->{source_name},
+            $data,
+            $storage_hint,
+        );
+    }
+    else {
+        # Fallback for Mocks or tests that don't provide a full bridge
+        # We use the generic Row class here
+        $row = DBIx::Class::Async::Row->new(
+            schema      => $self->{schema},
+            async_db    => $self->{async_db},
+            source_name => $self->{source_name},
+            row_data    => $data,
+            in_storage  => $storage_hint // 0,
+        );
     }
 
-    $data    //= {};
-    my $source = $self->result_source;
-    my ($pk)   = $source->primary_columns;
-
-    # 2. Determine storage state
-    my $is_in_storage = 0;
-    if (exists $data->{_in_storage}) {
-        $is_in_storage = delete $data->{_in_storage};
-    } elsif ($pk && defined $data->{$pk}) {
-        $is_in_storage = 1;
-    }
-
-    # 3. Data Normalisation (Keeping the working Prefetch & Count fixes)
-    my %clean_data;
-    my %rel_data;
-
-    my %expected = map { lc($_) => $_ } $source->columns;
-    if (my $as = $self->{attrs}->{as}) {
-        my @as_list = ref $as eq 'ARRAY' ? @$as : ($as);
-        $expected{lc($_)} = $_ for @as_list;
-    }
-
-    foreach my $key (keys %$data) {
-        my $clean_key = $key;
-        $clean_key    =~ s/^me\.//i;
-
-        if (ref $data->{$key} eq 'HASH' || ref $data->{$key} eq 'ARRAY') {
-            $rel_data{$key} = $data->{$key};
-        }
-        elsif (exists $expected{lc($clean_key)}) {
-            $clean_data{$expected{lc($clean_key)}} = $data->{$key};
-        }
-        else {
-            # Keep literal counts/aliases
-            $clean_data{$key} = $data->{$key};
-        }
-    }
-
-    # 4. Instantiate the Row
-    my $row = $row_class->new(
-        schema      => $self->{schema},
-        async_db    => $self->{async_db},
-        source_name => $source_name,
-        row_data    => \%clean_data,
-        in_storage  => $is_in_storage,
-    );
-
-    # 5. Handle Custom Result Class Overrides
+    # 2. Dynamic Class Hijacking (Custom Result Classes)
     my $target_class = $self->result_class;
+    my $base_row_class = ref($row);
 
-    # If the target class isn't our standard generated one, we must rebless
-    if ($target_class ne $row_class
+    # If the user requested a specific class (not the standard one), we re-bless
+    if ($target_class ne $base_row_class
         && $target_class ne $self->result_source->result_class) {
-        my $anon_class = "${row_class}::WITH::" . $target_class;
+
+        my $anon_class = "${base_row_class}::WITH::" . $target_class;
         $anon_class =~ s/::/_/g;
         $anon_class = "DBIx::Class::Async::Anon::$anon_class";
 
         no strict 'refs';
         unless (@{"${anon_class}::ISA"}) {
-            # Load the custom class if needed
             eval "require $target_class" unless $target_class->can('new');
-
-            # The order ensures Async::Row methods take precedence over custom ones
-            @{"${anon_class}::ISA"} = ($row_class, $target_class);
+            # Async::Row methods must come first to ensure async-safety
+            @{"${anon_class}::ISA"} = ($base_row_class, $target_class);
         }
         bless $row, $anon_class;
-    }
-
-    # 6. Finalise state
-    $row->{_dirty} = {} if $is_in_storage;
-    $row->{_data}  = \%clean_data;
-
-    if (keys %rel_data) {
-        $row->{_relationship_data} = \%rel_data;
     }
 
     return $row;
@@ -385,19 +343,22 @@ sub all {
 
     # 2. Handle Prefetched/Manual entries
     if ($self->{is_prefetched} && $self->{entries}) {
-        # Check if they are already objects or need inflation
-        if (ref $self->{entries}[0] && $self->{entries}[0]->isa('DBIx::Class::Async::Row')) {
-            $self->{_rows} = $self->{entries};
-        } else {
-            $self->{_rows} = $self->_inflate_collection($self->{entries});
-        }
+        # Ensure these are marked as in_storage
+        $self->{_rows} = [
+            map {
+                (ref($_) && $_->isa('DBIx::Class::Async::Row'))
+                ? $_
+                : $self->new_result($_, { in_storage => 1 })
+            } @{$self->{entries}}
+        ];
         return Future->done($self->{_rows});
     }
 
     # 3. Standard Async Fetch
+    # all_future now returns OBJECTS (marked in_storage => 1)
     return $self->all_future->then(sub {
-        my ($rows_data) = @_;
-        $self->{_rows} = $self->_inflate_collection($rows_data);
+        my ($rows) = @_; # This is now an arrayref of objects
+        $self->{_rows} = $rows;
         $self->{_pos}  = 0;
         return Future->done($self->{_rows});
     });
@@ -440,7 +401,8 @@ sub all_future {
         # Store raw data so iterator methods can use them without re-fetching
         $self->{_rows}  = $rows_data;
         $self->{_pos}   = 0;
-        return Future->done($rows_data);
+        my @objects = map { $self->new_result($_, { in_storage => 1 }) } @$rows_data;
+        return Future->done(\@objects);
     });
 }
 
@@ -1007,7 +969,7 @@ sub find_or_new {
             $clean_data{$clean_key} = $v;
         }
 
-        return Future->done($self->new_result(\%clean_data));
+        return Future->done($self->new_result(\%clean_data, { in_storage => 0 }));
     });
 }
 
@@ -1235,25 +1197,35 @@ to restart iteration.
 sub next {
     my $self = shift;
 
-    # 1. If we already have the rows in the buffer, return the next one via Future
+    # 1. If we already have the rows in the buffer
     if ($self->{_rows}) {
         $self->{_pos} //= 0;
         if ($self->{_pos} >= @{$self->{_rows}}) {
             return Future->done(undef);
         }
-        return Future->done($self->{_rows}[$self->{_pos}++]);
+
+        my $data = $self->{_rows}[$self->{_pos}++];
+
+        # Ensure we return an object.
+        # If it's already an object (from our new all_future), this is a no-op.
+        # If it's a raw hash, we inflate it and mark it as in-storage.
+        my $row = (ref($data) eq 'HASH')
+            ? $self->new_result($data, { in_storage => 1 })
+            : $data;
+
+        return Future->done($row);
     }
 
-    # 2. If the buffer is empty, use the async 'all' method
+    # 2. If the buffer is empty, use 'all' (which calls all_future)
     return $self->all->then(sub {
-        my $rows = shift; # This is the \@rows from all()
+        my $rows = shift;
 
-        # 'all' already sets {_rows} and {_pos}, but we'll be explicit
         if (!$rows || !@$rows) {
             return Future->done(undef);
         }
 
-        # Return the first row found
+        # all_future now populates $self->{_rows} with OBJECTS.
+        # We just grab the first one.
         return Future->done($self->{_rows}[$self->{_pos}++]);
     });
 }
@@ -2049,14 +2021,17 @@ attributes.
 sub single_future {
     my ($self, $cond, $attrs) = @_;
 
+    # 1. Handle prefetched cache
     if ($self->{is_prefetched} && $self->{entries}) {
         my $data = $self->{entries}[0];
-        return Future->done($data ? $self->new_result($data) : undef);
+        # Mark as in_storage if data exists
+        return Future->done($data ? $self->new_result($data, { in_storage => 1 }) : undef);
     }
 
     my @pk = $self->result_source->primary_columns;
     my $cond_type = ref $self->{_cond};
 
+    # 2. Optimized find path
     if (@pk == 1
         && $cond_type eq 'HASH'
         && !exists $self->{_attrs}->{select}
@@ -2069,13 +2044,16 @@ sub single_future {
             $self->{_cond}{$pk[0]}
         )->then(sub {
             my $data = shift;
-            return Future->done($data ? $self->new_result($data) : undef);
+            # Mark as in_storage
+            return Future->done($data ? $self->new_result($data, { in_storage => 1 }) : undef);
         });
     }
 
+    # 3. Fallback search path
     return $self->search($cond, { %{ $attrs || {} }, rows => 1 })->all->then(sub {
         my $results = shift;
         my $row = ($results && @$results) ? $results->[0] : undef;
+        $row->in_storage(1) if $row;
         return Future->done($row);
     });
 }

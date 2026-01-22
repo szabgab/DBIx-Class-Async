@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.46';
+$DBIx::Class::Async::VERSION   = '0.47';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.46
+Version 0.47
 
 =cut
 
@@ -316,7 +316,7 @@ Creates a new row.
         { name => 'John', email => 'john@example.com' }
     );
 
-Returns: Hashref of created row data.
+Returns a L<DBIx::Class::Async::Row> object.
 
 =cut
 
@@ -347,8 +347,8 @@ sub create {
         }
 
         my $final_data = $self->_merge_result_data($resultset, $deflated_data, $result);
-
-        return Future->done($self->_inflate_row($resultset, $final_data));
+        my $in_storage = 1;
+        return Future->done($self->_inflate_row($resultset, $final_data, $in_storage));
     })
     ->catch(sub {
         my ($error) = @_;
@@ -828,8 +828,15 @@ sub search {
     $self->{stats}{queries}++;
     $self->_record_metric('inc', 'db_async_queries_total');
 
-    my $cache_key = delete $attrs->{cache_key} // _generate_cache_key('search', $resultset, $search_args, $attrs);
-    my $use_cache = exists $attrs->{cache} ? delete $attrs->{cache} : defined $self->{cache_ttl};
+    my $use_cache = exists $attrs->{cache}
+        ? delete $attrs->{cache}
+        : defined $self->{cache_ttl};
+
+    my $cache_key;
+    if ($use_cache) {
+        $cache_key = delete $attrs->{cache_key}
+            // _generate_cache_key('search', $resultset, $search_args, $attrs);
+    }
 
     if ($use_cache) {
         my $cached = $self->{cache}->get($cache_key);
@@ -892,17 +899,13 @@ Returns: Array of results in the same order as queries.
 sub search_multi {
     my ($self, @queries) = @_;
 
-    # Record total query count
-    $self->{stats}{queries} += scalar @queries;
-    $self->_record_metric('inc', 'db_async_queries_total', scalar @queries);
+    my $start_time = time;
 
     # 1. Reuse the hardened search() method for each query
     my @futures = map {
         my ($resultset, $search_args, $attrs) = @$_;
         $self->search($resultset, $search_args, $attrs)
     } @queries;
-
-    my $start_time = time;
 
     # 2. Use needs_all so the entire batch fails if ANY single query fails
     return Future->needs_all(@futures)->then(sub {
@@ -1096,6 +1099,11 @@ the worker will immediately:
 =item 2. Fail the L<Future> in the parent process with the specific error message.
 
 =back
+
+B<Note on Concurrency:> This entire batch is dispatched to a single worker
+process to ensure that the transaction maintains ACID properties. While the
+batch is running, that specific worker is "pinned" and unavailable for other
+queries.
 
 =cut
 
@@ -1771,21 +1779,63 @@ sub _generate_cache_key {
 }
 
 sub _inflate_row {
-    my ($self, $source_name, $data) = @_;
+    my ($self, $source_name, $data, $in_storage_override) = @_;
     return undef unless defined $data;
 
-    # Last line of defense: if an error slipped through to here,
-    # return it instead of a Row object.
     if (my $error = $self->_check_response($data)) {
         return $error;
     }
 
-    return DBIx::Class::Async::Row->new(
+    # Determine storage state FIRST
+    my $is_in_storage = $in_storage_override;
+    if (!defined $is_in_storage) {
+        $is_in_storage = (ref $data eq 'HASH' && exists $data->{_in_storage})
+            ? $data->{_in_storage} # Check before shallow copy if you like
+            : 0;
+    }
+
+    # 2. Shallow copy
+    my $inflated = { %$data };
+
+    # 3. Walk the relationships to find nested data
+    my $source = $self->_schema_instance->source($source_name);
+
+    # Only walk relationships if the source supports it
+    if ($source->can('relationships')) {
+        foreach my $rel ($source->relationships) {
+            if (exists $inflated->{$rel} && defined $inflated->{$rel}) {
+                my $rel_info   = $source->relationship_info($rel);
+                my $rel_source = $rel_info->{source};
+
+                if (ref $inflated->{$rel} eq 'ARRAY') {
+                    $inflated->{$rel} = [
+                        map {
+                            $self->_inflate_row($rel_source, $_, $is_in_storage)
+                        } @{$inflated->{$rel}}
+                    ];
+                }
+                elsif (ref $inflated->{$rel} eq 'HASH') {
+                    $inflated->{$rel} = $self->_inflate_row($rel_source, $inflated->{$rel}, $is_in_storage);
+                }
+            }
+        }
+    }
+
+    # 4. Dynamic Subclassing (to satisfy isa_ok checks in tests)
+    my $row_class = "DBIx::Class::Async::Row::$source_name";
+    {
+        no strict 'refs';
+        unless (@{"${row_class}::ISA"}) {
+            @{"${row_class}::ISA"} = ('DBIx::Class::Async::Row');
+        }
+    }
+
+    return $row_class->new(
         schema      => $self->_schema_instance,
         async_db    => $self,
         source_name => $source_name,
-        row_data    => $data,
-        in_storage  => 1,
+        row_data    => $inflated,
+        in_storage  => $is_in_storage,
     );
 }
 
@@ -2129,8 +2179,11 @@ sub _merge_result_data {
     }
     elsif (defined $returned_result && !ref $returned_result) {
         my $source = $self->_schema_instance->source($source_name);
-        my ($pk)   = $source->primary_columns;
-        $merged->{$pk} = $returned_result if $pk;
+        my @pks    = $source->primary_columns;
+        # Only assign if there is exactly one PK (typical for auto-inc)
+        if (scalar @pks == 1) {
+            $merged->{$pks[0]} = $returned_result;
+        }
     }
 
     return $merged;

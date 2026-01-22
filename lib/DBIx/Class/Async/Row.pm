@@ -15,11 +15,11 @@ DBIx::Class::Async::Row - Asynchronous row object for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.46
+Version 0.47
 
 =cut
 
-our $VERSION = '0.46';
+our $VERSION = '0.47';
 
 =head1 SYNOPSIS
 
@@ -792,19 +792,11 @@ sub in_storage {
 
     if (defined $val) {
         $self->{_in_storage} = $val ? 1 : 0;
-        return $self->{_in_storage};
+        # If it's in storage, it's no longer 'dirty' (unsaved changes)
+        $self->{_dirty} = {} if $self->{_in_storage};
     }
 
-    return $self->{_in_storage} if exists $self->{_in_storage};
-
-    # Fallback: Does the object have a primary key value?
-    my $source = eval { $self->result_source };
-    if ($source) {
-        my ($pk) = $source->primary_columns;
-        return 1 if $pk && defined $self->{_data}{$pk};
-    }
-
-    return 0;
+    return $self->{_in_storage} // 0;
 }
 
 =head2 is_column_changed
@@ -1681,17 +1673,19 @@ sub _ensure_accessors {
     return if $class eq 'DBIx::Class::Async::Row';
 
     # 1. Handle Columns
-    foreach my $col ($source->columns) {
-        no strict 'refs';
-        next if defined &{"${class}::$col"}; # Skip if already installed
+    if ($source->can('columns')) {
+        foreach my $col ($source->columns) {
+            no strict 'refs';
+            next if defined &{"${class}::$col"}; # Skip if already installed
 
-        my $column_name = $col;
-        no warnings 'redefine';
-        *{"${class}::$column_name"} = sub {
-            my $inner = shift;
-            return @_ ? $inner->set_column($column_name, shift)
-                      : $inner->get_column($column_name);
-        };
+            my $column_name = $col;
+            no warnings 'redefine';
+            *{"${class}::$column_name"} = sub {
+                my $inner = shift;
+                return @_ ? $inner->set_column($column_name, shift)
+                          : $inner->get_column($column_name);
+            };
+        }
     }
 
     # 2. Handle Relationships
