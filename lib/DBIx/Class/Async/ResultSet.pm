@@ -16,11 +16,11 @@ DBIx::Class::Async::ResultSet - Asynchronous resultset for DBIx::Class::Async
 
 =head1 VERSION
 
-Version 0.44
+Version 0.45
 
 =cut
 
-our $VERSION = '0.44';
+our $VERSION = '0.45';
 
 =head1 SYNOPSIS
 
@@ -981,20 +981,19 @@ inflated with the provided data. This object is B<not> yet saved to the database
 
 sub find_or_new {
     my ($self, $data, $attrs) = @_;
+    $attrs //= {};
 
-    # 1. Attempt to find the record first
-    return $self->find($data, $attrs)->then(sub {
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
+
+    return $self->find($lookup, $attrs)->then(sub {
         my ($row) = @_;
-
-        # 2. If found, return it
         return Future->done($row) if $row;
 
-        # 3. If not found, instantiate a new result object locally.
-        # We merge the search data with ResultSet conditions (like foreign keys).
+        # Clean prefix logic
         my %new_data = ( %{$self->{_cond} || {}}, %$data );
         my %clean_data;
         while (my ($k, $v) = each %new_data) {
-            (my $clean_key = $k)    =~ s/^(?:foreign|self)\.//;
+            (my $clean_key = $k) =~ s/^(?:me|foreign|self)\.//;
             $clean_data{$clean_key} = $v;
         }
 
@@ -1015,42 +1014,16 @@ sub find_or_create {
     my ($self, $data, $attrs) = @_;
     $attrs //= {};
 
-    my $source = $self->result_source;
-    my $key_name = $attrs->{key} || 'primary';
-    my @unique_cols = $source->unique_constraint_columns($key_name);
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
 
-    # 1. Smart Discovery (Your new logic)
-    if (!grep { exists $data->{$_} } @unique_cols) {
-        foreach my $constraint ($source->unique_constraint_names) {
-            my @cols = $source->unique_constraint_columns($constraint);
-            if (grep { exists $data->{$_} } @cols) {
-                @unique_cols = @cols;
-                last;
-            }
-        }
-    }
-
-    # 2. Build the %lookup for the 'find' parts
-    my %lookup = map { $_ => $data->{$_} } grep { exists $data->{$_} } @unique_cols;
-    %lookup = %$data if !keys %lookup;
-
-    # 3. Optimized Flow: Find -> (if not found) -> Create -> (if race condition) -> Find
-    return $self->find(\%lookup, $attrs)->then(sub {
+    return $self->find($lookup, $attrs)->then(sub {
         my ($row) = @_;
-        return Future->done($row) if $row; # Standard path: record exists
+        return Future->done($row) if $row;
 
-        # Not found, try to create
         return $self->create($data)->catch(sub {
             my ($error) = @_;
-            my $err_str = "$error";
-
-            if ($err_str =~ /unique constraint|already exists/i) {
-                # RACE CONDITION: Someone inserted it between our 'find' and 'create'
-                return $self->find(\%lookup, $attrs)->then(sub {
-                    my ($recovered) = @_;
-                    return $recovered ? Future->done($recovered)
-                                      : Future->fail("Race condition recovery failed");
-                });
+            if ("$error" =~ /unique constraint|already exists/i) {
+                return $self->find($lookup, $attrs); # Race recovery
             }
             return Future->fail($error);
         });
@@ -2321,30 +2294,32 @@ object representing the updated or newly created record.
 
 sub update_or_create {
     my ($self, $data, $attrs) = @_;
-
     $attrs //= {};
-    my $source      = $self->result_source;
-    my $key_name    = $attrs->{key} || 'primary';
-    my @unique_cols = $source->unique_constraint_columns($key_name);
 
-    my %lookup;
-    if (@unique_cols) {
-        @lookup{@unique_cols} = @{$data}{@unique_cols};
-    } else {
-        %lookup = %$data;
-    }
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
 
-    # Try to find the record
-    return $self->find(\%lookup, $attrs)->then(sub {
-        my $row = shift;
+    return $self->find($lookup, $attrs)->then(sub {
+        my ($row) = @_;
 
         if ($row) {
-            # Found: Perform an update with the provided data
+            # Found: Update it
             return $row->update($data);
         }
 
-        # Not Found: Create it
-        return $self->create($data);
+        # Not Found: Try to create it
+        return $self->create($data)->catch(sub {
+            my ($error) = @_;
+            # If a race occurred, catch the unique constraint error
+            if ("$error" =~ /unique constraint|already exists/i) {
+                # Find the record that "won" and update it instead
+                return $self->find($lookup, $attrs)->then(sub {
+                    my ($recovered) = @_;
+                    return $recovered ? $recovered->update($data)
+                                      : Future->fail("Race recovery failed in update_or_create");
+                });
+            }
+            return Future->fail($error);
+        });
     });
 }
 
@@ -2376,11 +2351,27 @@ Returns a L<Future> resolving to a L<DBIx::Class::Async::Row> object.
 
 sub update_or_new {
     my ($self, $data, $attrs) = @_;
+    $attrs //= {};
 
-    # Behavior: find it and update it, or return a 'new' object with the data
-    return $self->update_or_create($data, $attrs)->then(sub {
-        my $row = shift;
-        return Future->done($row);
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
+
+    return $self->find($lookup, $attrs)->then(sub {
+        my ($row) = @_;
+
+        if ($row) {
+            # It exists: Update and return
+            return $row->update($data);
+        }
+
+        # It doesn't exist: Return a new local result
+        my %new_data = ( %{$self->{_cond} || {}}, %$data );
+        my %clean_data;
+        while (my ($k, $v) = each %new_data) {
+            (my $clean_key = $k) =~ s/^(?:me|foreign|self)\.//;
+            $clean_data{$clean_key} = $v;
+        }
+
+        return Future->done($self->new_result(\%clean_data));
     });
 }
 
@@ -2481,6 +2472,67 @@ sub _do_search_related {
         _rows       => undef,
         _pos        => 0,
     }, ref($self);
+}
+
+=head2 _extract_unique_lookup
+
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
+
+An internal helper method used by L</find_or_create> and L</find_or_new> to
+determine the most appropriate unique identifier for a C<find> operation.
+
+It attempts to resolve the lookup columns in the following order:
+
+=over 4
+
+=item 1.
+
+The specific constraint name provided in C<$attrs-E<gt>{key}>.
+
+=item 2.
+
+The Primary Key (if all PK columns are present in the data).
+
+=item 3.
+
+Smart Discovery: The first unique constraint found where all constituent
+columns exist within the provided C<$data> hashref.
+
+=item 4.
+
+Fallback: The entire C<$data> hashref.
+
+=back
+
+This ensures that searches are targeted to unique indexes, which is critical
+for recovering from race conditions without hitting "Multiple rows found"
+errors or searching on non-indexed fields.
+
+=cut
+
+sub _extract_unique_lookup {
+    my ($self, $data, $attrs) = @_;
+
+    my $source = $self->result_source;
+    my $key_name = $attrs->{key} || 'primary';
+    my @unique_cols = $source->unique_constraint_columns($key_name);
+
+    # Smart Discovery: If primary key isn't in data, look for other unique constraints
+    if (!grep { exists $data->{$_} } @unique_cols) {
+        foreach my $constraint ($source->unique_constraint_names) {
+            my @cols = $source->unique_constraint_columns($constraint);
+            if (grep { exists $data->{$_} } @cols) {
+                @unique_cols = @cols;
+                last;
+            }
+        }
+    }
+
+    # Build the lookup only from those specific columns
+    my %lookup = map { $_ => $data->{$_} } grep { exists $data->{$_} } @unique_cols;
+
+    # Absolute fallback
+    return keys %lookup ? \%lookup : $data;
 }
 
 =head2 _get_source
