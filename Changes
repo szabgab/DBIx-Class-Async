@@ -1,5 +1,8 @@
 Revision history for DBIx::Class::Async
 
+0.43  2026-01-22
+      - Minor test cleanup.
+
 0.42  2026-01-22
       - [MAJOR] Added DBIx::Class::Async::ResultComponent to provide
         non-blocking row-level update() and delete() methods.

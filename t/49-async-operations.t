@@ -26,9 +26,9 @@ use DBIx::Class::Async;
         my ($self, $op, $rs, $search_args) = @_;
         require Future;
 
-        # Return success ONLY if we explicitly ask for 'Gemini' to test inflation
-        if ($op eq 'search' && ref $search_args eq 'HASH' && ($search_args->{name}||'') eq 'Gemini') {
-            return Future->done([ { id => 1, name => 'Gemini' } ]);
+        # Return success ONLY if we explicitly ask for 'John' to test inflation
+        if ($op eq 'search' && ref $search_args eq 'HASH' && ($search_args->{name}||'') eq 'John') {
+            return Future->done([ { id => 1, name => 'John' } ]);
         }
 
         # Otherwise keep the error behavior for everything else
@@ -77,7 +77,7 @@ subtest 'Verify update_bulk() correctly fails on error' => sub {
 
 subtest 'Verify search() correctly fails on error' => sub {
     # search() expects ($resultset, $search_args, $attrs)
-    my $f = $async->search('User', { name => 'John' });
+    my $f = $async->search('User', { name => 'TriggerError' });
 
     my $success = eval { $f->get; 1 };
     my $err = $@;
@@ -118,7 +118,7 @@ subtest 'Verify search_multi() logic and error handling' => sub {
 subtest 'Verify search_multi() successfully inflates Row objects' => sub {
     # This query will match our new 'success' condition in the mock
     my $f = $async->search_multi(
-        ['User', { name => 'Gemini' }]
+        ['User', { name => 'John' }]
     );
 
     my @results = $f->get;
@@ -130,7 +130,7 @@ subtest 'Verify search_multi() successfully inflates Row objects' => sub {
 
     # This is the "Inflation" check
     isa_ok($first_row, 'DBIx::Class::Async::Row', "Individual result");
-    is($first_row->get_column('name'), 'Gemini', "Row data is preserved via get_column");
+    is($first_row->get_column('name'), 'John', "Row data is preserved via get_column");
 
     # Verify it has the methods a Row should have
     can_ok($first_row, 'update', 'delete', 'discard_changes');
