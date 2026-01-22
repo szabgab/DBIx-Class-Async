@@ -6,7 +6,7 @@ DBIx::Class::Async::ResultComponent - Non-blocking row-level CRUD for DBIx::Clas
 
 =head1 VERSION
 
-Version 0.48
+Version 0.49
 
 =cut
 

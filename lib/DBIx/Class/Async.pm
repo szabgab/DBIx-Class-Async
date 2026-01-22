@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.48';
+$DBIx::Class::Async::VERSION   = '0.49';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =head1 NAME
@@ -9,7 +9,7 @@ DBIx::Class::Async - Asynchronous database operations for DBIx::Class
 
 =head1 VERSION
 
-Version 0.48
+Version 0.49
 
 =cut
 
@@ -283,7 +283,7 @@ Returns: Integer count.
 =cut
 
 sub count {
-    my ($self, $resultset, $search_args) = @_;
+    my ($self, $resultset, $search_args, $attrs) = @_;
 
     # Allow Hash (standard), Array (OR/AND logic), or ScalarRef (Literal SQL)
     state $check = compile(Str, Maybe[ HashRef | ArrayRef | ScalarRef ]);
@@ -294,7 +294,7 @@ sub count {
 
     my $start_time = time;
 
-    return $self->_call_worker('count', $resultset, $search_args)->then(sub {
+    return $self->_call_worker('count', $resultset, $search_args, $attrs)->then(sub {
         my ($result) = @_;
         my $duration = time - $start_time;
         $self->_record_metric('observe', 'db_async_query_duration_seconds', $duration);
@@ -1659,8 +1659,24 @@ sub _execute_operation {
 
         my $count = eval {
             my $rs = $schema->resultset($source_name);
-            # Ensure we have hashes to avoid "Not a HASH reference" errors in DBIC
-            $rs->search($search_args || {}, $attrs || {})->count;
+            my $query_rs = $rs->search($search_args || {}, $attrs || {});
+
+            # If is_subquery is present, we want the count of the SLICE
+            if ($attrs && $attrs->{is_subquery}) {
+                my $subquery = $query_rs->as_query;
+
+                # Create a virtual ResultSet using the subquery as the 'from' source
+                return $schema->resultset($source_name)->search(
+                    {},
+                    {
+                        from => [ { subq => $subquery } ],
+                        alias => 'subq'
+                    }
+                )->count;
+            }
+
+            # Standard count (ignores rows/offset)
+            return $query_rs->count;
         };
 
         if ($@) {
