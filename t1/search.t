@@ -6,6 +6,10 @@ use File::Temp qw(tempfile);
 use TestSchema;
 use DBIx::Class::Async::Schema;
 
+BEGIN {
+    $SIG{__WARN__} = sub {};
+}
+
 # 1. Setup the physical environment
 my $loop = IO::Async::Loop->new;
 my ($fh, $db_file) = tempfile(SUFFIX => '.db', UNLINK => 1);
@@ -44,8 +48,6 @@ is(ref($rs), 'DBIx::Class::Async::ResultSet', 'Still an Async ResultSet after ch
 is_deeply($rs->{_cond}, { -and => [ { active => 1 }, { name => 'Alice' } ] }, 'Conditions merged correctly');
 
 # 3. Test Execution via Worker
-diag "Testing async execution (Crossing to Worker)...";
-# We call 'all' which we defined to return a Future
 my $future = $rs->all();
 
 # Wait for the worker to finish

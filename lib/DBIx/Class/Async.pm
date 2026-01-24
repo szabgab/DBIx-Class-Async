@@ -71,6 +71,13 @@ sub _call_worker {
     return $future;
 }
 
+sub update {
+    my ($db, $payload) = @_;
+    warn "[PID $$] STAGE 2 (Parent): Bridge - sending 'update' to worker";
+
+    return _call_worker($db, 'update', $payload);
+}
+
 sub all {
     my ($db, $payload) = @_;
     warn "[PID $$] STAGE 2 (Parent): Bridge - sending 'all' to worker";
@@ -81,7 +88,7 @@ sub all {
 sub count {
     my ($db, $payload) = @_;
 
-    warn "[PID $$] STAGE 2 (Parent): Bridge - sending to worker";
+    warn "[PID $$] STAGE 2 (Parent): Bridge - sending 'count' to worker";
     $db->{_stats}{_queries}++;
 
     # Call worker and return the Future directly
@@ -357,27 +364,21 @@ sub _init_workers {
 
                         warn "[PID $$] Executing count...";
                         $result = $rs->count;
-
                         warn "[PID $$] Count complete: $result";
                     }
                     elsif ($operation eq 'search') {
-                       warn "[PID $$] STAGE 6 (Worker): Performing search";
+                        warn "[PID $$] STAGE 6 (Worker): Performing search";
 
                         my $source_name = $payload->{source_name};
                         my $cond        = $payload->{cond}  || {};
                         my $attrs       = $payload->{attrs} || {};
-
-                        # 1. Get the ResultSet
                         my $rs = $schema->resultset($source_name)->search($cond, $attrs);
 
-                        # 2. Execute and flatten to simple data (no objects!)
-                        # Using HRI (HashRefInflator) makes this very fast and dependency-free
+                        # Execute and flatten to simple data (no objects!)
                         $rs->result_class($attrs->{result_class} || 'DBIx::Class::ResultClass::HashRefInflator');
 
                         my @rows = $rs->all;
                         $result  = \@rows;
-
-                        warn "[PID $$] Search complete: found " . scalar(@rows) . " rows";
                     }
                     elsif ($operation eq 'all') {
                         warn "[PID $$] STAGE 6 (Worker): Performing 'all' (search)";
@@ -386,14 +387,23 @@ sub _init_workers {
                         my $cond        = $payload->{cond};
                         my $attrs       = $payload->{attrs};
 
-                        # Use the real schema from the worker's cache
                         my $rs = $schema->resultset($source_name)->search($cond, $attrs);
 
-                        # Force HashRefInflator so we don't try to send Row objects across the bridge
+                        # Execute and flatten to simple data (no objects!)
                         $rs->result_class($attrs->{result_class} || 'DBIx::Class::ResultClass::HashRefInflator');
 
                         my @rows = $rs->all;
-                        $result = \@rows;
+                        $result  = \@rows;
+                    }
+                    elsif ($operation eq 'update') {
+                        my $source_name = $payload->{source_name};
+                        my $cond        = $payload->{cond};
+                        my $updates     = $payload->{updates};
+
+                        $result = $schema->resultset($source_name)
+                                         ->search($cond)
+                                         ->update($updates);
+                        # Usually returns the number of rows affected
                     }
                     else {
                         die "Unknown operation: $operation";
@@ -405,6 +415,7 @@ sub _init_workers {
                     die $@;
                 }
 
+                warn "[PID $$] Worker returning result type: " . ref($result);
                 warn "[PID $$] Worker returning: $result";
                 return $result;
             },

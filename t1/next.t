@@ -8,6 +8,10 @@ use lib 'lib';
 use TestSchema;
 use DBIx::Class::Async::Schema;
 
+BEGIN {
+    $SIG{__WARN__} = sub {};
+}
+
 # 1. Setup real temporary SQLite database
 my ($fh, $filename) = tempfile(SUFFIX => '.db', UNLINK => 1);
 my $dsn = "dbi:SQLite:dbname=$filename";

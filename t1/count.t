@@ -7,6 +7,10 @@ use File::Temp qw(tempfile);
 
 use Data::Dumper;
 
+BEGIN {
+    $SIG{__WARN__} = sub {};
+}
+
 # The pieces we've built
 use TestSchema;
 use DBIx::Class::Async::Schema;

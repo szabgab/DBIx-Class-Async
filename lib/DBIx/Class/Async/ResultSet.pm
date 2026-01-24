@@ -51,7 +51,7 @@ sub new_result_set {
         _result_class => $args->{result_class} // $self->{_result_class},
         _cond         => $args->{cond}        // {},
         _attrs        => $args->{attrs}       // {},
-        _rows         => $args->{rows},
+        _rows         => undef,
         _pos          => $args->{pos}         // 0,
         _pager        => $args->{pager},
         _entries      => $args->{entries},
@@ -86,6 +86,57 @@ sub _build_payload {
     };
 }
 
+sub update {
+    my ($self, $data) = @_;
+
+    # PATH A: Fast Path
+    # Triggered if there are no complex attributes (like rows/offset),
+    if ( keys %{$self->{_attrs} || {}} == 0 && $self->{_cond} && keys %{$self->{_cond}} ) {
+        warn "[PID $$] update() - Taking Path A (Fast Path)";
+        return DBIx::Class::Async::update(
+            $self->{_async_db}, {
+                source_name => $self->{_source_name},
+                cond        => $self->{_cond},
+                updates     => $data,
+            }
+        );
+    }
+
+    # PATH B: Safe Path
+    # Use the ID-mapping strategy to respect LIMIT/OFFSET/Group By.
+    warn "[PID $$] update() - Taking Path B (Safe Path via update_all)";
+    return $self->update_all($data);
+}
+
+sub update_all {
+    my ($self, $updates) = @_;
+    my $bridge = $self->{_async_db};
+
+    return $self->all->then(sub {
+        my $rows = shift;
+
+        # Hard check: is it really an arrayref?
+        unless ($rows && ref($rows) eq 'ARRAY' && @$rows) {
+            warn "[PID $$] update_all found no rows to update or invalid data type";
+            return Future->done(0);
+        }
+
+        my ($pk) = $self->result_source->primary_columns;
+        my @ids  = map { $_->get_column($pk) } @$rows;
+
+         my $payload = {
+            source_name => $self->{_source_name},
+            cond        => { $pk => { -in => \@ids } },
+            updates     => $updates,
+        };
+
+        return DBIx::Class::Async::update($bridge, $payload)->then(sub {
+            my $affected = shift;
+            return Future->done($affected);
+        });
+    });
+}
+
 sub count {
     my ($self, $cond, $attrs) = @_;
 
@@ -104,7 +155,9 @@ sub all {
     my ($self) = @_;
 
     # 1. Return cached objects if we already have them
-    return Future->done($self->{_rows}) if $self->{_rows};
+    if ($self->{_rows} && ref($self->{_rows}) eq 'ARRAY') {
+        return Future->done($self->{_rows});
+    }
 
     # 2. Handle Prefetched/Manual entries (The "Pass-through" logic)
     if ($self->{_is_prefetched} && $self->{_entries}) {
@@ -129,7 +182,7 @@ sub all {
         $self->{_rows} = $rows; # Cache the Hijacked Objects
         $self->{_pos}  = 0;     # Reset iterator position
 
-        return Future->done($self->{_rows});
+        return Future->done($rows);
     });
 }
 
@@ -143,6 +196,12 @@ sub all_future {
         attrs       => $self->{_attrs},
     })->then(sub {
         my $rows_data = shift;
+
+        if (!ref($rows_data) || ref($rows_data) ne 'ARRAY') {
+            warn "[PID $$] Bridge error: expected ARRAYREF, got: " . ($rows_data // 'undef');
+            return Future->done([]); # Return empty to avoid crash
+        }
+
         my @objects   = map { $self->new_result($_, { in_storage => 1 }) } @$rows_data;
         return Future->done(\@objects);
     });
@@ -229,13 +288,41 @@ sub search {
         cond          => $new_cond,
         attrs         => $merged_attrs,
         result_class  => $attrs->{result_class} // $self->{_result_class},
-        rows          => $merged_attrs->{rows}  // undef,
         pos           => 0,
         pager         => undef,
         entries       => undef,
         is_prefetched => 0,
     });
 }
+
+sub search_rs {
+    my $self = shift;
+    return $self->search(@_);
+}
+
+sub find {
+    my ($self, $id) = @_;
+    warn "[PID $$] find() called with id=$id";
+    return Future->done(undef) unless defined $id;
+
+    # search_rs creates a NEW resultset limited to this ID
+    my $rs = $self->search_rs({ id => $id });
+    warn "[PID $$] find() created search_rs, _rows=" . (defined $rs->{_rows} ? ref($rs->{_rows}) || 'SCALAR:' . $rs->{_rows} : 'undef');
+
+    return $rs->single;
+}
+
+sub single {
+    my $self = shift;
+    warn "[PID $$] single() called, _rows=" . (defined $self->{_rows} ? ref($self->{_rows}) || 'SCALAR:' . $self->{_rows} : 'undef');
+
+    # We use search here to ensure we only ask the worker for 1 row
+    my $rs = $self->search(undef, { rows => 1 });
+    warn "[PID $$] single() created search with rows=1, _rows=" . (defined $rs->{_rows} ? ref($rs->{_rows}) || 'SCALAR:' . $rs->{_rows} : 'undef');
+
+    return $rs->next;
+}
+
 
 sub as_query {
     my $self = shift;
