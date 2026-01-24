@@ -74,6 +74,111 @@ This class acts as a bridge between the synchronous DBIx::Class API and the
 asynchronous backend provided by L<DBIx::Class::Async>. It manages connection
 pooling, result sets, and transaction handling in an asynchronous context.
 
+=cut
+
+ sub connect {
+     my ($class, @args) = @_;
+
+     # Separate async options from connect_info
+     my $async_options = {};
+     if (ref $args[-1] eq 'HASH' && !exists $args[-1]->{RaiseError}) {
+         $async_options = pop @args;
+     }
+
+     my $schema_class = $async_options->{schema_class}
+        or croak "schema_class is required in async options";
+
+     # Validation logic stays exactly as is
+     my $schema_loaded = 0;
+     if (eval { $schema_class->can('connect') }) {
+         $schema_loaded = 1;
+     }
+     elsif (eval "require $schema_class") {
+         $schema_loaded = 1;
+     }
+     elsif (eval "package main; \$${schema_class}::VERSION ||= '0.01'; 1") {
+         $schema_loaded = 1;
+     }
+
+     unless ($schema_loaded) {
+         croak "Cannot load schema class $schema_class: $@";
+     }
+
+     my $async_db = eval {
+         DBIx::Class::Async->create_async_db(
+             schema_class => $schema_class,
+             connect_info => \@args,
+             %$async_options,
+         );
+     };
+     warn "In Schema.pm, connect()";
+
+
+     if ($@) {
+         croak "Failed to create async engine: $@";
+     }
+
+     my $self = bless {
+         _async_db      => $async_db,
+         _sources_cache => {},
+     }, $class;
+
+     # Storage plumbing
+     my $storage = DBIx::Class::Async::Storage::DBI->new(
+         schema   => $self,
+         async_db => $async_db,
+     );
+
+     $self->{_storage} = $storage;
+
+     return $self;
+}
+
+sub resultset {
+    my ($self, $source_name) = @_;
+
+    croak "resultset() requires a source name" unless $source_name;
+
+    return DBIx::Class::Async::ResultSet->new(
+        schema      => $self->{_async_db}->{_schema_class},
+        async_db    => $self->{_async_db},
+        source_name => $source_name,
+    );
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 =head1 CONSTRUCTOR
 
 =head2 connect
@@ -141,7 +246,7 @@ Croaks if the async instance cannot be created.
 
 =cut
 
-sub connect {
+sub ________connect {
     my ($class, @args) = @_;
 
     # Separate async options from connect_info
@@ -591,7 +696,7 @@ Croaks if C<$source_name> is not provided.
 
 =cut
 
-sub resultset {
+sub _______resultset {
     my ($self, $source_name) = @_;
 
     croak "resultset() requires a source name" unless $source_name;

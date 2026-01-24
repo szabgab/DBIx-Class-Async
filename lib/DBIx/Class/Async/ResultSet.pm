@@ -8,6 +8,7 @@ use v5.14;
 use Carp;
 use Future;
 use Scalar::Util 'blessed';
+use DBIx::Class::Async;
 use DBIx::Class::Async::Row;
 
 =head1 NAME
@@ -161,7 +162,192 @@ Croaks if any required parameter is missing.
 
 =cut
 
+use Data::Dumper;
+
 sub new {
+    my ($class, %args) = @_;
+
+    # 1. Validation
+    croak "Missing required argument: schema"      unless $args{schema};
+    croak "Missing required argument: async_db"    unless $args{async_db};
+    croak "Missing required argument: source_name" unless $args{source_name};
+
+    # 2. Internal blessing
+    return bless {
+        _schema        => $args{schema},
+        _async_db      => $args{async_db},
+        _source_name   => $args{source_name},
+        _result_class  => $args{result_class},
+        _source        => undef,
+        _cond          => $args{cond}  || {},
+        _attrs         => $args{attrs} || {},
+        _rows          => undef,
+        _pos           => 0,
+        _pager         => $args{pager} || undef,
+        _entries       => $args{entries}       || undef,
+        _is_prefetched => $args{is_prefetched} || 0,
+     }, $class;
+}
+
+sub new_result_set {
+    my ($self, $args) = @_;
+
+    my $class = ref $self;
+
+    # 2. Inherit the Async Bridge and the Source context
+    $args->{async_db}    //= $self->{_async_db};
+    $args->{source_name} //= $self->{_source_name};
+    $args->{schema}      //= $self->{_schema};
+
+    # 3. Handle result_class inheritance
+    # If a new one isn't provided, keep the parent's
+    $args->{result_class} //= $self->{_result_class};
+
+    # 4. Standard DBIC state defaults for new ResultSets
+    $args->{cond}  //= {};
+    $args->{attrs} //= {};
+
+    # 5. Bless the new object into our Async class
+    return bless $args, $class;
+}
+
+sub _build_payload {
+    my ($self, $cond, $attrs) = @_;
+
+    # 1. Base Merge
+    my $merged_cond  = { %{ $self->{_cond}  || {} }, %{ $cond  || {} } };
+    my $merged_attrs = { %{ $self->{_attrs} || {} }, %{ $attrs || {} } };
+
+    # 2. The "Slice" Special Case
+    # DBIC requires subquery wrappers for counts on results with limits/offsets
+    if ( $merged_attrs->{rows} || $merged_attrs->{offset} || $merged_attrs->{limit} ) {
+        $merged_attrs->{alias}       //= 'subquery_for_count';
+        $merged_attrs->{is_subquery} //= 1;
+    }
+
+    # 3. Future Special Cases (Reserved)
+    # This is where you'd handle things like custom 'join' logic
+    # or ensuring 'order_by' is stripped for simple counts to save CPU.
+
+    return {
+        source_name => $self->{_source_name},
+        cond        => $merged_cond,
+        attrs       => $merged_attrs,
+    };
+}
+
+sub count {
+    my ($self, $cond, $attrs) = @_;
+
+    my $db = $self->{_async_db};
+    $db->{_stats}{_queries}++;
+
+    my $payload = $self->_build_payload($cond, $attrs);
+
+    warn "[PID $$] STAGE 1 (Parent): Dispatching count";
+
+    # This returns a Future that will be resolved by the worker
+    return DBIx::Class::Async::count($db, $payload);
+}
+
+sub search {
+    my ($self, $cond, $attrs) = @_;
+
+    # Handle the condition merging carefully
+    my $new_cond;
+
+    # 1. If the new condition is a literal (Scalar/Ref), it overrides/becomes the condition
+    if (ref $cond eq 'REF' || ref $cond eq 'SCALAR') {
+        $new_cond = $cond;
+    }
+
+    # 2. If the current existing condition is a literal,
+    # and we try to add a hash, we usually want to encapsulate or override.
+    # For now, let's allow the new condition to take precedence if it's a hash.
+    elsif (ref $cond eq 'HASH') {
+        if (ref $self->{_cond} eq 'HASH' && keys %{$self->{_cond}}) {
+            # ONLY use -and if we actually have two sets of criteria to join
+            $new_cond = { -and => [ $self->{_cond}, $cond ] };
+        }
+        else {
+            # If the current condition is empty/undef, just use the new one
+            $new_cond = $cond;
+        }
+    }
+    else {
+        # Fallback for simple cases or undef
+        $new_cond = $cond || $self->{_cond};
+    }
+
+    my $merged_attrs = { %{$self->{_attrs} || {}}, %{$attrs || {}} };
+
+    return $self->new_result_set({
+        cond         => $new_cond,
+        attrs        => $merged_attrs,
+        # Only reset these if they aren't in the merged attributes
+        result_class  => $attrs->{result_class} // $self->{_result_class},
+        _rows         => $merged_attrs->{rows}  // undef,
+        _pos          => 0,
+        _pager        => undef,
+        entries       => undef,
+        is_prefetched => 0,
+    });
+}
+
+sub as_query {
+    my $self = shift;
+
+    my $bridge       = $self->{_async_db};
+    my $schema_class = $bridge->{_schema_class};
+
+    unless ($schema_class->can('resultset')) {
+        eval "require $schema_class" or die "as_query: $@";
+    }
+
+    # Silence the "Generic Driver" warnings for the duration of this method
+    local $SIG{__WARN__} = sub {
+        warn @_ unless $_[0] =~ /undetermined_driver|sql_limit_dialect|GenericSubQ/
+    };
+
+    unless ($bridge->{_metadata_schema}) {
+        $bridge->{_metadata_schema} = $schema_class->connect('dbi:NullP:');
+    }
+
+    # SQL is generated lazily; warnings often trigger here or at as_query()
+    my $real_rs = $bridge->{_metadata_schema}
+                         ->resultset($self->{_source_name})
+                         ->search($self->{_cond}, $self->{_attrs});
+
+    return $real_rs->as_query;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+sub ________new {
     my ($class, %args) = @_;
 
     croak "Missing required argument: schema"      unless $args{schema};
@@ -284,7 +470,7 @@ Accepts a hashref of attributes to override in the new instance.
 
 =cut
 
-sub new_result_set {
+sub ______new_result_set {
     my ($self, $args) = @_;
     $args //= {};
 
@@ -397,7 +583,7 @@ A list containing two hash references: conditions and attributes.
 
 =cut
 
-sub as_query {
+sub _______as_query {
     my $self = shift;
     my $bridge = $self->{async_db};
     my $schema_class = $bridge->{schema_class};
@@ -451,7 +637,7 @@ If a limit (rows) or offset is applied, this returns the size of that slice
 
 =cut
 
-sub count {
+sub _____________count {
     my $self = shift;
 
     # Check for anything that constitutes a "Slice"
@@ -1685,7 +1871,7 @@ are merged with any existing ones from the original result set.
 
 =cut
 
-sub search {
+sub _____search {
     my ($self, $cond, $attrs) = @_;
 
     # Handle the condition merging carefully

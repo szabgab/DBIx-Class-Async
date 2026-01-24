@@ -92,8 +92,8 @@ sub new {
 
     # Standard DBIC storage expects a reference to the schema
     my $self = bless {
-        _schema  => $args{schema},
-        async_db => $args{async_db}, # The worker pool engine
+        _schema   => $args{schema},
+        _async_db => $args{async_db}, # The worker pool engine
     }, $class;
 
     # WEAKEN the schema reference to prevent circular memory leaks
@@ -227,10 +227,12 @@ This method calls C<disconnect> on the associated schema object if it exists.
 
 sub disconnect {
     my $self = shift;
-    # Delegate cleanup to the async engine
-    if ($self->{async_db} && $self->{async_db}->can('disconnect')) {
-        $self->{async_db}->disconnect;
+
+    # Delegate cleanup to the functional library
+    if ($self->{_async_db}) {
+        DBIx::Class::Async::disconnect_async_db($self->{_async_db});
     }
+
     return 1;
 }
 
