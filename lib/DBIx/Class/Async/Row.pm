@@ -9,119 +9,6 @@ use Carp;
 use Future;
 use Scalar::Util qw(blessed);
 
-=head1 NAME
-
-DBIx::Class::Async::Row - Asynchronous row object for DBIx::Class::Async
-
-=head1 VERSION
-
-Version 0.49
-
-=cut
-
-our $VERSION = '0.49';
-
-=head1 SYNOPSIS
-
-    # Typically obtained via a ResultSet bridge
-    my $user = $rs->find(1)->get;
-
-    # Accessing Data (Synchronous/In-memory)
-
-    say "User: " . $user->name;
-    my $email = $user->get_column('email');
-    my %data  = $user->get_columns;
-
-    # Persistence Operations (Asynchronous, returns Future)
-
-    # Update with chaining
-    $user->update({ last_login => time })->then(sub {
-        my $self = shift;
-        say "Update complete for: " . $self->email;
-
-        # Discard local changes and refetch fresh data from DB
-        return $self->discard_changes;
-    })->then(sub {
-        my $fresh_user = shift;
-        say "Confirmed DB state: " . $fresh_user->last_login;
-    });
-
-    # Delete record
-    $user->delete->then(sub {
-        say "Record removed from database.";
-    });
-
-    # Relationship Access (Asynchronous)
-
-    # If the Row component is loaded, access related sets
-    $user->search_related('orders', { status => 'pending' })
-         ->all
-         ->then(sub {
-             my @orders = @_;
-             say "Found " . scalar(@orders) . " pending orders.";
-         });
-
-=head1 DESCRIPTION
-
-C<DBIx::Class::Async::Row> provides an asynchronous row object that represents
-a single database row in a L<DBIx::Class::Async> application. It mimics the
-interface of L<DBIx::Class::Row> but returns L<Future> objects for asynchronous
-database operations.
-
-This class is typically instantiated by L<DBIx::Class::Async> and not directly
-by users. It provides both synchronous column access and asynchronous methods
-for database operations.
-
-=head1 CONSTRUCTOR
-
-=head2 new
-
-    my $row = DBIx::Class::Async::Row->new(
-        schema      => $schema,            # DBIx::Class::Schema instance
-        async_db    => $async_db,          # DBIx::Class::Async instance
-        source_name => $source_name,       # Result source name
-        row_data    => \%data,             # Hashref of row data
-    );
-
-Creates a new asynchronous row object.
-
-=over 4
-
-=item B<Parameters>
-
-=over 8
-
-=item C<schema>
-
-A L<DBIx::Class::Schema> instance. Required.
-
-=item C<async_db>
-
-A L<DBIx::Class::Async> instance. Required.
-
-=item C<source_name>
-
-The name of the result source (table). Required.
-
-=item C<row_data>
-
-Hash reference containing the row's column data. Required.
-
-=back
-
-=item B<Throws>
-
-=over 4
-
-=item *
-
-Croaks if any required parameter is missing.
-
-=back
-
-=back
-
-=cut
 
 # PRIVATE CONSTANTS
 # Protects internal attributes from being treated as database columns
@@ -139,16 +26,16 @@ sub new {
     my $data       = $args{row_data} || $args{_data} || {};
 
     my $self = bless {
-        schema         => $args{schema},
-        async_db       => $args{async_db},
-        source_name    => $args{source_name},
-        _source        => $args{_source} // undef,
-        _data          => { %$data },
-        _dirty         => {},
-        _inflated      => {},
-        _related       => {},
-        _in_storage    => $in_storage,
-        _inflation_map => {},
+        _schema         => $args{schema},
+        _async_db       => $args{async_db},
+        _source_name    => $args{source_name},
+        _result_source  => $args{result_source} // undef,
+        _data           => { %$data },
+        _dirty          => {},
+        _inflated       => {},
+        _related        => {},
+        _in_storage     => $in_storage,
+        _inflation_map  => {},
     }, $class;
 
     $self->_ensure_accessors;
@@ -181,87 +68,6 @@ sub new {
     return $self;
 }
 
-=head1 METHODS
-
-=head2 copy
-
-    my $future = $row->copy(\%changes);
-    $future->then(sub {
-        my ($new_row) = @_;
-        # use $new_row
-    });
-
-Creates a copy of the current row object with optional modifications.
-
-This method performs an asynchronous copy operation that:
-
-=over 4
-
-=item * Creates a new database record with the same column values as the current row
-
-=item * Automatically excludes auto-increment columns (primary keys) from the copy
-
-=item * Allows overriding specific column values through the C<\%changes> parameter
-
-=item * Returns a L<Future> that resolves to a new row object of the same class
-
-=back
-
-B<Parameters:>
-
-=over 4
-
-=item C<$changes>
-
-Optional hash reference containing column-value pairs to override in the copied row.
-The changes are applied I<after> excluding auto-increment columns, so you can use this
-to set a different primary key if needed.
-
-If not provided or C<undef>, an empty hash reference will be used.
-
-=back
-
-B<Returns:> L<Future> that resolves to a new L<DBIx::Class::Async::Row> object (or subclass)
-representing the copied database record.
-
-B<Example:>
-
-    # Simple copy
-    $product->copy->then(sub {
-        my ($copy) = @_;
-        say "Copied product ID: " . $copy->id;
-    });
-
-    # Copy with modifications
-    $product->copy({
-        name => $product->name . ' (Copy)',
-        sku  => 'NEW-SKU-123'
-    })->then(sub {
-        my ($modified_copy) = @_;
-        # New row with changed name and SKU
-    });
-
-B<Notes:>
-
-=over 4
-
-=item * Auto-increment columns are automatically detected and excluded from the copy
-
-=item * The method performs the copy at the database level, not just object duplication
-
-=item * The returned row object will be of the appropriate subclass if one exists
-(e.g., C<DBIx::Class::Async::Row::Product> for a Product source)
-
-=item * All database constraints and triggers will apply during the copy operation
-
-=item * The original row object remains unchanged
-
-=back
-
-B<Throws:> Exceptions from the underlying database operations will be propagated
-through the returned L<Future>.
-
-=cut
 
 sub copy {
     my ($self, $changes) = @_;
@@ -298,30 +104,6 @@ sub copy {
     return $self->{async_db}->resultset($self->{source_name})->create(\%data);
 }
 
-=head2 create_related
-
-  my $post_future = $user->create_related('posts', {
-      title   => 'My First Post',
-      content => 'Hello World!'
-  });
-
-  my $post = await $post_future;
-
-A convenience method that creates a new record in the specified relationship.
-
-It internally calls C<related_resultset> to identify the correct foreign key
-mapping (e.g., setting C<user_id> to the current user's ID) and then invokes
-C<create> on the resulting ResultSet.
-
-This method returns a L<Future> that resolves to a new Row object of the
-related type.
-
-B<Note:> Just like L<DBIx::Class::Async::ResultSet/create>, this method
-automatically merges the relationship's foreign key constraints into the
-provided hashref, ensuring that C<NOT NULL> constraints on the foreign key
-columns are satisfied.
-
-=cut
 
 sub create_related {
     my ($self, $rel_name, $col_data) = @_;
@@ -329,35 +111,6 @@ sub create_related {
     return $self->related_resultset($rel_name)->create($col_data);
 }
 
-=head2 delete
-
-    $row->delete
-        ->then(sub {
-            my ($success) = @_;
-            if ($success) {
-                say "Row deleted successfully";
-            }
-        })
-        ->catch(sub {
-            my ($error) = @_;
-            # Handle error
-        });
-
-Asynchronously deletes the row from the database.
-
-=over 4
-
-=item B<Returns>
-
-A L<Future> that resolves to true if the row was deleted, false otherwise.
-
-=item B<Throws>
-
-Croaks if the row doesn't have a primary key.
-
-=back
-
-=cut
 
 sub delete {
     my ($self) = @_;
@@ -389,28 +142,6 @@ sub delete {
     });
 }
 
-=head2 discard_changes
-
-  $row->discard_changes->then(sub {
-      my ($refreshed_row) = @_;
-      # Row data reloaded from database
-  });
-
-Reloads the row data from the database, discarding any changes.
-
-=over 4
-
-=item B<Returns>
-
-A L<Future> that resolves to the refreshed row object.
-
-=item B<Notes>
-
-This refetches the row from the database and clears the dirty columns hash.
-
-=back
-
-=cut
 
 sub discard_changes {
     my $self = shift;
@@ -451,36 +182,6 @@ sub discard_changes {
     });
 }
 
-=head2 get_column
-
-    my $value = $row->get_column($column_name);
-
-Synchronously retrieves a column value from the row.
-
-=over 4
-
-=item B<Parameters>
-
-=over 8
-
-=item C<$column_name>
-
-Name of the column to retrieve.
-
-=back
-
-=item B<Returns>
-
-The column value. If the column has an inflator defined, returns the
-inflated value.
-
-=item B<Throws>
-
-Croaks if the column doesn't exist.
-
-=back
-
-=cut
 
 sub get_column {
     my ($self, $col) = @_;
@@ -529,21 +230,6 @@ sub get_column {
     return $raw;
 }
 
-=head2 get_columns
-
-    my %columns = $row->get_columns;
-
-Returns all columns as a hash.
-
-=over 4
-
-=item B<Returns>
-
-Hash containing all column names and values.
-
-=back
-
-=cut
 
 sub get_columns {
     my $self = shift;
@@ -563,35 +249,6 @@ sub get_columns {
     return wantarray ? %cols : \%cols;
 }
 
-=head2 get_dirty_columns
-
-  my %dirty = $row->get_dirty_columns;
-  my $dirty_ref = $row->get_dirty_columns;
-
-Returns columns that have been modified but not yet saved.
-
-=over 4
-
-=item B<Returns>
-
-In list context: Hash of column-value pairs for dirty columns.
-
-In scalar context: Hashref of column-value pairs for dirty columns.
-
-=item B<Examples>
-
-  $row->set_column('name' => 'Alice');
-  $row->set_column('email' => 'alice@example.com');
-
-  my %dirty = $row->get_dirty_columns;
-  # %dirty = (name => 'Alice', email => 'alice@example.com')
-
-  my @dirty_cols = keys %dirty;
-  say "Modified: " . join(', ', @dirty_cols);
-
-=back
-
-=cut
 
 sub get_dirty_columns {
     my $self = shift;
@@ -604,21 +261,6 @@ sub get_dirty_columns {
     return wantarray ? %dirty_values : \%dirty_values;
 }
 
-=head2 get_inflated_columns
-
-    my %inflated_columns = $row->get_inflated_columns;
-
-Returns all columns with inflated values where applicable.
-
-=over 4
-
-=item B<Returns>
-
-Hash containing all column names and inflated values.
-
-=back
-
-=cut
 
 sub get_inflated_columns {
     my $self = shift;
@@ -631,49 +273,6 @@ sub get_inflated_columns {
     return %inflated;
 }
 
-=head2 id
-
-  my $id  = $row->id;          # Single primary key
-  my @ids = $row->id;          # Composite primary key (multiple values)
-
-Returns the primary key value(s) for a row.
-
-=over 4
-
-=item B<Arguments>
-
-None
-
-=item B<Returns>
-
-In list context: List of primary key values.
-
-In scalar context: Single primary key value (for single-column primary keys) or
-arrayref of values (for composite primary keys).
-
-=item B<Throws>
-
-Dies if:
-- Called as a class method
-- No primary key defined for the source
-- Row is not in storage and primary key value is undefined
-
-=item B<Examples>
-
-  # Single primary key
-  my $user = $rs->find(1)->get;
-  my $id = $user->id;  # Returns: 1
-
-  # Composite primary key
-  my $record = $rs->find({ key1 => 1, key2 => 2 })->get;
-  my @ids = $record->id;  # Returns: (1, 2)
-
-  # Arrayref in scalar context (composite key)
-  my $ids = $record->id;  # Returns: [1, 2]
-
-=back
-
-=cut
 
 sub id {
     my $self = shift;
@@ -715,28 +314,6 @@ sub id {
     }
 }
 
-=head2 insert
-
-    $row->insert
-        ->then(sub {
-            my ($inserted_row) = @_;
-            # Row has been inserted
-        });
-
-Asynchronously inserts the row into the database.
-
-Note: This method is typically called automatically by L<DBIx::Class::Async/create>.
-For existing rows, it returns an already-resolved Future.
-
-=over 4
-
-=item B<Returns>
-
-A L<Future> that resolves to the row object.
-
-=back
-
-=cut
 
 sub insert {
     my $self = shift;
@@ -751,41 +328,12 @@ sub insert {
     return $self->update_or_insert;
 }
 
-=head2 insert_or_update
-
-  await $row->insert_or_update;
-
-Arguments: \%fallback_data?
-Return Value: L<Future> resolving to $row
-
-An alias for L</update_or_insert>. Provided for compatibility with
-standard L<DBIx::Class::Row> method naming.
-
-=cut
 
 sub insert_or_update {
     my $self = shift;
     return $self->update_or_insert(@_);
 }
 
-=head2 in_storage
-
-    if ($row->in_storage) {
-        # Row exists in database
-    }
-
-Checks whether the row exists in the database.
-
-=over 4
-
-=item B<Returns>
-
-True if the row is in storage (has a primary key and hasn't been deleted),
-false otherwise.
-
-=back
-
-=cut
 
 sub in_storage {
     my ($self, $val) = @_;
@@ -799,33 +347,6 @@ sub in_storage {
     return $self->{_in_storage} // 0;
 }
 
-=head2 is_column_changed
-
-  if ($row->is_column_changed('name')) {
-      say "Name was modified";
-  }
-
-Checks if a specific column has been modified but not yet saved.
-
-=over 4
-
-=item B<Arguments>
-
-=over 8
-
-=item C<$column>
-
-The column name to check.
-
-=back
-
-=item B<Returns>
-
-True if the column is dirty (modified), false otherwise.
-
-=back
-
-=cut
 
 sub is_column_changed {
     my ($self, $column) = @_;
@@ -835,50 +356,11 @@ sub is_column_changed {
     return exists $self->{_dirty}{$column} ? 1 : 0;
 }
 
-=head2 is_column_dirty
-
-  if ($row->is_column_dirty('email')) {
-      print "Email has been changed but not saved yet!";
-  }
-
-Arguments: $column_name
-Return Value: 1|0
-
-Returns a boolean value indicating whether the specified column has been modified
-since the row was last fetched from or saved to the database.
-
-=cut
-
 sub is_column_dirty {
     my ($self, $column) = @_;
     return exists $self->{_dirty}{$column} ? 1 : 0;
 }
 
-=head2 make_column_dirty
-
-  $row->make_column_dirty('name');
-
-Marks a column as dirty even if its value hasn't changed.
-
-=over 4
-
-=item B<Arguments>
-
-=over 8
-
-=item C<$column>
-
-The column name to mark as dirty.
-
-=back
-
-=item B<Returns>
-
-The row object itself (for chaining).
-
-=back
-
-=cut
 
 sub make_column_dirty {
     my ($self, $column) = @_;
@@ -889,47 +371,6 @@ sub make_column_dirty {
 
     return $self;
 }
-
-=head2 related_resultset
-
-    my $rs = $row->related_resultset($relationship_name);
-
-Returns a resultset for a related table.
-
-=over 4
-
-=item B<Parameters>
-
-=over 8
-
-=item C<$relationship_name>
-
-Name of the relationship as defined in the result class.
-
-=back
-
-=item B<Returns>
-
-A L<DBIx::Class::ResultSet> for the related table, filtered by the
-relationship condition.
-
-=item B<Throws>
-
-=over 4
-
-=item *
-
-Croaks if the relationship doesn't exist.
-
-=item *
-
-Croaks if the relationship condition cannot be parsed.
-
-=back
-
-=back
-
-=cut
 
 sub related_resultset {
     my ($self, $rel_name) = @_;
@@ -984,77 +425,12 @@ sub related_resultset {
     return $self->{async_db}->resultset($moniker)->search($search_cond);
 }
 
-=head2 result_source
-
-    my $source = $row->result_source;
-
-Returns the L<DBIx::Class::ResultSource> for this row.
-
-=over 4
-
-=item B<Returns>
-
-The result source object, or undef if not available.
-
-=back
-
-=cut
 
 sub result_source {
     my $self = shift;
     return $self->_get_source;
 }
 
-=head2 set_column
-
-  $row->set_column('name' => 'Alice');
-  $row->set_column('email' => 'alice@example.com');
-
-Sets a raw column value. If the new value is different from the old one,
-the column is marked as dirty for when you next call C<update>.
-
-=over 4
-
-=item B<Arguments>
-
-=over 8
-
-=item C<$columnname>
-
-The name of the column to set.
-
-=item C<$value>
-
-The value to set. Can be a scalar, object, or reference.
-
-=back
-
-=item B<Returns>
-
-The value that was set.
-
-=item B<Notes>
-
-- If the new value differs from the old value, the column is marked as dirty
-- If passed an object or reference, it will be stored as-is
-- Use C<set_inflated_columns> for proper inflation/deflation
-- Better yet, use column accessors: C<< $row->name('Alice') >>
-
-=item B<Examples>
-
-  # Set a simple value
-  $row->set_column('name' => 'Bob');
-
-  # Set to undef
-  $row->set_column('email' => undef);
-
-  # Mark as dirty and update
-  $row->set_column('active' => 0);
-  $row->update->get;
-
-=back
-
-=cut
 
 sub set_column {
     my ($self, $col, $value) = @_;
@@ -1103,47 +479,6 @@ sub set_column {
     return $value;
 }
 
-=head2 set_columns
-
-  $row->set_columns({
-      name   => 'Alice',
-      email  => 'alice@example.com',
-      active => 1,
-  });
-
-Sets multiple column, raw value pairs at once.
-
-=over 4
-
-=item B<Arguments>
-
-=over 8
-
-=item C<\%columndata>
-
-A hashref of column-value pairs.
-
-=back
-
-=item B<Returns>
-
-The row object itself (for chaining).
-
-=item B<Examples>
-
-  # Set multiple columns
-  $row->set_columns({
-      name   => 'Bob',
-      email  => 'bob@example.com',
-      active => 1,
-  });
-
-  # Chain with update
-  $row->set_columns({ name => 'Carol' })->update->get;
-
-=back
-
-=cut
 
 sub set_columns {
     my ($self, $values) = @_;
@@ -1158,36 +493,6 @@ sub set_columns {
     return $self;
 }
 
-=head2 update
-
-  # Update with explicit values
-  $row->update({ name => 'Bob', email => 'bob@example.com' })->get;
-
-  # Update using dirty columns (after set_column/set_columns)
-  $row->set_column('name', 'Bob');
-  $row->update()->get;  # Updates only dirty columns
-
-Updates the row in the database.
-
-=over 4
-
-=item B<Arguments>
-
-=over 8
-
-=item C<\%values> (optional)
-
-A hashref of column-value pairs to update. If not provided, uses dirty columns.
-
-=back
-
-=item B<Returns>
-
-A L<Future> that resolves to the updated row object.
-
-=back
-
-=cut
 
 sub update {
     my ($self, $values) = @_;
@@ -1211,45 +516,6 @@ sub update {
     return $self->update_or_insert;
 }
 
-=head2 update_or_insert
-
-  my $future = $row->update_or_insert({ name => 'New Name' });
-
-  $future->on_done(sub {
-      my $row = shift;
-      print "Row saved successfully";
-  });
-
-Arguments: \%fallback_data?
-Return Value: L<Future> resolving to $row
-
-Provides a "save" mechanism that intelligently decides whether to perform an
-C<INSERT> or an C<UPDATE> based on the current state of the row object.
-
-=over 4
-
-=item 1
-
-If the row is already C<in_storage>, it performs an C<update>. Only columns
-marked as "dirty" (changed) will be sent to the database. If no columns are
-dirty, the Future resolves immediately with the current row object.
-
-=item 2
-
-If the row is not in storage, it performs a C<create>. The entire contents
-of the row's data are sent to the database.
-
-=back
-
-You may optionally pass a hashref of data to this method. These values will be
-passed to C<set_column> before the save operation begins, effectively merging
-ad-hoc changes into the row.
-
-Upon success, the row's internal "dirty" tracking is reset, C<in_storage> is
-set to true, and any database-generated values (like auto-increment IDs) are
-synchronised back into the object.
-
-=cut
 
 sub update_or_insert {
     my ($self, $data) = @_;
@@ -1399,32 +665,6 @@ sub update_or_insert {
     }
 }
 
-=head1 AUTOLOAD METHODS
-
-Called automatically for column and relationship access
-
-    my $value = $row->column_name;
-    my $related = $row->relationship_name;
-
-Handles dynamic method dispatch for columns and relationships.
-
-The class uses AUTOLOAD to provide dynamic accessors for:
-
-=over 4
-
-=item *
-
-Column values (e.g., C<< $row->name >> for column 'name')
-
-=item *
-
-Relationship accessors (e.g., C<< $row->orders >> for 'orders' relationship)
-
-=back
-
-Relationship results are cached in the object after first access.
-
-=cut
 
 sub AUTOLOAD {
     my $self = shift;
@@ -1833,16 +1073,16 @@ Returns the result source for this row, loading it lazily if needed.
 sub _get_source {
     my $self = shift;
 
-    unless ($self->{_source}) {
-        if ($self->{schema}
-            && ref $self->{schema}
-            && $self->{schema}->can('source')) {
-            $self->{_source} = eval { $self->{schema}->source($self->{source_name}) };
-            return $self->{_source} if $self->{_source};
+    unless ($self->{_result_source}) {
+        if ($self->{_schema}
+            && ref $self->{_schema}
+            && $self->{_schema}->can('source')) {
+            $self->{_result_source} = eval { $self->{_schema}->source($self->{_source_name}) };
+            return $self->{_result_source} if $self->{_result_source};
         }
     }
 
-    return $self->{_source};
+    return $self->{_result_source};
 }
 
 #
@@ -1872,100 +1112,5 @@ sub _is_internal {
     return $col =~ $INTERNAL_KEYS;
 }
 
-=head1 SEE ALSO
-
-=over 4
-
-=item *
-
-L<DBIx::Class::Async> - Asynchronous DBIx::Class interface
-
-=item *
-
-L<DBIx::Class::Row> - Synchronous DBIx::Class row interface
-
-=item *
-
-L<Future> - Asynchronous programming abstraction
-
-=back
-
-=head1 AUTHOR
-
-Mohammad Sajid Anwar, C<< <mohammad.anwar at yahoo.com> >>
-
-=head1 REPOSITORY
-
-L<https://github.com/manwar/DBIx-Class-Async>
-
-=head1 BUGS
-
-Please report any bugs or feature requests through the web interface at L<https://github.com/manwar/DBIx-Class-Async/issues>.
-I will  be notified and then you'll automatically be notified of progress on your
-bug as I make changes.
-
-=head1 SUPPORT
-
-You can find documentation for this module with the perldoc command.
-
-    perldoc DBIx::Class::Async::Row
-
-You can also look for information at:
-
-=over 4
-
-=item * BUG Report
-
-L<https://github.com/manwar/DBIx-Class-Async/issues>
-
-=item * CPAN Ratings
-
-L<http://cpanratings.perl.org/d/DBIx-Class-Async>
-
-=item * Search MetaCPAN
-
-L<https://metacpan.org/dist/DBIx-Class-Async/>
-
-=back
-
-=head1 LICENSE AND COPYRIGHT
-
-Copyright (C) 2026 Mohammad Sajid Anwar.
-
-This program  is  free software; you can redistribute it and / or modify it under
-the  terms  of the the Artistic License (2.0). You may obtain a  copy of the full
-license at:
-
-L<http://www.perlfoundation.org/artistic_license_2_0>
-
-Any  use,  modification, and distribution of the Standard or Modified Versions is
-governed by this Artistic License.By using, modifying or distributing the Package,
-you accept this license. Do not use, modify, or distribute the Package, if you do
-not accept this license.
-
-If your Modified Version has been derived from a Modified Version made by someone
-other than you,you are nevertheless required to ensure that your Modified Version
- complies with the requirements of this license.
-
-This  license  does  not grant you the right to use any trademark,  service mark,
-tradename, or logo of the Copyright Holder.
-
-This license includes the non-exclusive, worldwide, free-of-charge patent license
-to make,  have made, use,  offer to sell, sell, import and otherwise transfer the
-Package with respect to any patent claims licensable by the Copyright Holder that
-are  necessarily  infringed  by  the  Package. If you institute patent litigation
-(including  a  cross-claim  or  counterclaim) against any party alleging that the
-Package constitutes direct or contributory patent infringement,then this Artistic
-License to you shall terminate on the date that such litigation is filed.
-
-Disclaimer  of  Warranty:  THE  PACKAGE  IS  PROVIDED BY THE COPYRIGHT HOLDER AND
-CONTRIBUTORS  "AS IS'  AND WITHOUT ANY EXPRESS OR IMPLIED WARRANTIES. THE IMPLIED
-WARRANTIES    OF   MERCHANTABILITY,   FITNESS   FOR   A   PARTICULAR  PURPOSE, OR
-NON-INFRINGEMENT ARE DISCLAIMED TO THE EXTENT PERMITTED BY YOUR LOCAL LAW. UNLESS
-REQUIRED BY LAW, NO COPYRIGHT HOLDER OR CONTRIBUTOR WILL BE LIABLE FOR ANY DIRECT,
-INDIRECT, INCIDENTAL,  OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE
-OF THE PACKAGE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-=cut
 
 1; # End of DBIx::Class::Async::Row

@@ -119,6 +119,59 @@ sub all {
     return DBIx::Class::Async::all($db, $payload);
 }
 
+sub new_result {
+    my ($self, $data, $attrs) = @_;
+    return undef unless defined $data;
+
+    my $storage_hint = (ref $attrs eq 'HASH') ? $attrs->{in_storage} : undef;
+    my $db = $self->{_async_db}; # This is our plain hashref
+    my $result_source = $self->result_source;
+
+    # 1. Row Construction
+    # Since $db is a hashref, we can't call methods on it.
+    # We build the Async::Row directly using the keys in the hash.
+    my $row = DBIx::Class::Async::Row->new(
+        schema        => $self->{_schema},   # The actual schema object
+        async_db      => $db,                # The plain hashref itself
+        source_name   => $self->{_source_name},
+        result_source => $result_source,
+        row_data      => $data,
+        in_storage    => $storage_hint // 0,
+    );
+
+    # 2. Dynamic Class Hijacking (The "Hijack" Logic)
+    # We keep your exact logic for mixing the Async::Row with the Result Class
+    my $target_class = $self->{_result_class} || $self->result_source->result_class;
+    my $base_row_class = ref($row);
+
+    if ($target_class ne $base_row_class) {
+        # Create a unique name for the hijacked class
+        my $anon_class = "DBIx::Class::Async::Anon::" . ($base_row_class . "_" . $target_class) =~ s/::/_/gr;
+
+        no strict 'refs';
+        unless (@{"${anon_class}::ISA"}) {
+            # Ensure the target result class is loaded
+            eval "require $target_class" unless $target_class->can('new');
+            # Async::Row methods must come first in @ISA to intercept update/delete
+            @{"${anon_class}::ISA"} = ($base_row_class, $target_class);
+        }
+        bless $row, $anon_class;
+    }
+
+    return $row;
+}
+
+sub result_source {
+    my $self = shift;
+    return $self->_get_source;
+}
+
+sub _get_source {
+    my $self = shift;
+    $self->{_source} ||= $self->{_schema}->source($self->{_source_name});
+    return $self->{_source};
+}
+
 sub search {
     my ($self, $cond, $attrs) = @_;
 
@@ -146,7 +199,6 @@ sub search {
     }
 
     # --- 2. Attribute Merging ---
-    # Combine existing attributes (like 'join' or 'prefetch') with new ones
     my $merged_attrs = { %{$self->{_attrs} || {}}, %{$attrs || {}} };
 
     # --- 3. Return New ResultSet Object ---
