@@ -71,6 +71,13 @@ sub _call_worker {
     return $future;
 }
 
+sub create {
+    my ($db, $payload) = @_;
+    warn "[PID $$] STAGE 2 (Parent): Bridge - sending 'create' to worker";
+
+    return _call_worker($db, 'create', $payload);
+}
+
 sub update {
     my ($db, $payload) = @_;
     warn "[PID $$] STAGE 2 (Parent): Bridge - sending 'update' to worker";
@@ -404,6 +411,17 @@ sub _init_workers {
                                          ->search($cond)
                                          ->update($updates);
                         # Usually returns the number of rows affected
+                    }
+                    elsif ($operation eq 'create') {
+                        my $source_name = $payload->{source_name};
+                        my $data        = $payload->{data};
+
+                        # Perform the actual DBIC insert
+                        my $row = $schema->resultset($source_name)->create($data);
+
+                        # IMPORTANT: Return the inflated columns so the Parent gets
+                        # the Auto-Increment ID and any DB-side defaults.
+                        $result = { $row->get_inflated_columns };
                     }
                     else {
                         die "Unknown operation: $operation";

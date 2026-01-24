@@ -86,6 +86,32 @@ sub _build_payload {
     };
 }
 
+sub create {
+    my ($self, $data) = @_;
+
+    # Merge conditions (Relationship context)
+    my %to_insert = ( %{$self->{_cond} || {}}, %$data );
+
+    # Clean prefixes (e.g., 'me.id' or 'foreign.user_id')
+    my %final_data;
+    while (my ($k, $v) = each %to_insert) {
+        my $clean_key = $k;
+        $clean_key =~ s/^(?:foreign|self|me)\.//;
+        $final_data{$clean_key} = $v;
+    }
+
+    return DBIx::Class::Async::create(
+        $self->{_async_db}, {
+            source_name => $self->{_source_name},
+            data => \%final_data
+        }
+    )->then(sub {
+        my $db_data = shift;
+
+        return Future->done($self->new_result($db_data, { in_storage => 1 }));
+    });
+}
+
 sub update {
     my ($self, $data) = @_;
 
