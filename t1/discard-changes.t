@@ -69,4 +69,36 @@ subtest 'Row: discard_changes' => sub {
     is_deeply($row->{_dirty}, {}, 'Dirty flags were cleared');
 };
 
+subtest 'Row: discard_changes (Row Vanished)' => sub {
+    # 1. Setup: Create and fetch a user
+    my $id = 200;
+    $base_schema->resultset('User')->create({
+        id    => $id,
+        name  => 'Ghost User',
+        email => 'ghost@test.com'
+    });
+
+    my $row = $async_schema->resultset('User')->find($id)->get;
+    ok($row, 'Fetched row successfully');
+
+    # 2. Delete the row externally from the DB
+    $base_schema->resultset('User')->find($id)->delete;
+
+    # 3. Attempt to discard changes on the now-vanished row
+    my $f = $row->discard_changes();
+
+    # 4. Use 'failure' to catch the error
+    my $failed = 0;
+    $f->on_fail(sub {
+        my ($error) = @_;
+        like($error, qr/Row vanished|no longer exists/i, 'Caught expected "Row vanished" error');
+        $failed = 1;
+    });
+
+    # Wait for the future to finish (it will throw the error on ->get)
+    eval { $f->get };
+
+    ok($failed, 'Future correctly failed when row was missing');
+};
+
 done_testing();

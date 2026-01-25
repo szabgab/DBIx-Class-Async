@@ -292,6 +292,58 @@ sub update_or_create {
     });
 }
 
+sub page {
+    my ($self, $page_number) = @_;
+
+    # 1. Ensure we have a valid page number (default to 1)
+    my $page = $page_number || 1;
+
+    # 2. Capture existing rows attribute from _attrs, or default to 10
+    # This matches your old design's requirement
+    my $rows = $self->{_attrs}->{rows} || 10;
+
+    # 3. Delegate to search() for cloning and state preservation
+    # This passes through your bridge validation logic
+    return $self->search(undef, {
+        page => $page,
+        rows => $rows,
+    });
+}
+
+sub pager {
+    my $self = shift;
+
+    # 1. Return cached pager if it exists
+    return $self->{_pager} if $self->{_pager};
+
+    # 2. Strict check for paging attributes
+    unless ($self->is_paged) {
+        die "Cannot call ->pager on a non-paged resultset. Call ->page(\$n) first.";
+    }
+
+    # 3. Warning for unordered results (crucial for consistent pagination)
+    # Checks if we are NOT in a test environment (HARNESS_ACTIVE)
+    if (!$self->is_ordered && !$ENV{HARNESS_ACTIVE}) {
+        warn "DBIx::Class::Async Warning: Calling ->pager on an unordered ResultSet. " .
+             "Results may be inconsistent across pages.\n";
+    }
+
+    # 4. Lazy-load and instantiate the Async Pager
+    require DBIx::Class::Async::ResultSet::Pager;
+    return $self->{_pager} = DBIx::Class::Async::ResultSet::Pager->new(resultset => $self);
+}
+
+sub is_ordered {
+    my $self = shift;
+    # Check if 'order_by' exists in the attributes hashref
+    return (exists $self->{_attrs}->{order_by} && defined $self->{_attrs}->{order_by}) ? 1 : 0;
+}
+
+sub is_paged {
+    my $self = shift;
+    return (exists $self->{_attrs}->{page} && defined $self->{_attrs}->{page}) ? 1 : 0;
+}
+
 sub _extract_unique_lookup {
     my ($self, $data, $attrs) = @_;
 
@@ -348,6 +400,25 @@ sub count_future {
         source_name => $self->{_source_name},
         cond        => $self->{_cond},
         attrs       => $self->{_attrs},
+    });
+}
+
+sub count_total {
+    my ($self, $cond, $attrs) = @_;
+
+    # 1. Merge incoming parameters with existing ResultSet state
+    my %merged_cond  = ( %{ $self->{_cond}  || {} }, %{ $cond  || {} } );
+    my %merged_attrs = ( %{ $self->{_attrs} || {} }, %{ $attrs || {} } );
+
+    # 2. Strip slicing/ordering attributes to get the absolute total
+    delete @merged_attrs{qw(rows offset page order_by)};
+
+    # 3. Use the static call exactly like your other count() implementations
+    # $self->{async_db} is the $db handle passed as the first arg
+    return DBIx::Class::Async::count($self->{_async_db}, {
+        source_name => $self->{_source_name},
+        cond        => \%merged_cond,
+        attrs       => \%merged_attrs,
     });
 }
 

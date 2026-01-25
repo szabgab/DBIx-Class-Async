@@ -2,6 +2,7 @@ package DBIx::Class::Async::ResultSet::Pager;
 
 use strict;
 use warnings;
+use Carp;
 use Future;
 use POSIX qw(ceil);
 
@@ -130,7 +131,10 @@ been resolved. If not, it defaults to 1.
 
 sub last_page {
     my $self = shift;
-    my $total = $self->{_total_entries} // 0;
+    croak "Pager not initialized. Call ->total_entries first"
+        unless defined $self->{_total_entries};
+
+    my $total = $self->{_total_entries};
     return 1 if $total == 0;
     return ceil($total / $self->{_rows});
 }
