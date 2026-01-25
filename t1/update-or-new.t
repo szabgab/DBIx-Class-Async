@@ -41,7 +41,6 @@ subtest 'Debug Lookup' => sub {
 
     # If this shows the whole hash instead of just { email => ... },
     # the alias-aware fix above is required.
-    diag "Lookup produced: " . join(', ', keys %$lookup);
 
     ok(exists $lookup->{email}, "Lookup contains the unique column");
     ok(!exists $lookup->{'me.email'}, "Lookup cleaned the alias");

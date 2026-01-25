@@ -319,6 +319,11 @@ sub id {
     }
 }
 
+sub ident_condition {
+    my $self = shift;
+    my @pks   = $self->result_source->primary_columns;
+    return map { $_ => $self->get_column($_) } @pks;
+}
 
 sub insert {
     my $self = shift;
@@ -378,64 +383,64 @@ sub make_column_dirty {
 }
 
 sub related_resultset {
-    my ($self, $rel_name) = @_;
+    my ($self, $rel_name, $cond, $attrs) = @_;
 
-    my $source = $self->_get_source;
-    my $rel_info = $source->relationship_info($rel_name)
-        or croak "No such relationship '$rel_name'";
+    my $bridge       = $self->{_async_db};
+    my $schema_class = $bridge->{_schema_class};
+    my $connect_info = $bridge->{_connect_info};
+    my $temp_schema  = $schema_class->connect(@$connect_info);
 
-    # Get the condition
-    my $cond = $rel_info->{cond};
+    # Get the source for this row
+    my $source = $temp_schema->source($self->{_source_name});
 
-    my ($self_column, $foreign_column);
+    # Get the relationship information
+    my $rel_info = $source->relationship_info($rel_name);
+    unless ($rel_info) {
+        die "No such relationship '$rel_name' on " . $self->{_source_name};
+    }
 
-    if (ref $cond eq 'HASH') {
-        # Parse hashref: { 'foreign.id' => 'self.user_id' } or { 'foreign.user_id' => 'self.id' }
-        foreach my $key (keys %$cond) {
-            my $value = $cond->{$key};
-            if ($value =~ /^self\.(\w+)$/) {
-                $self_column = $1;
-                $foreign_column = $key;
-                $foreign_column =~ s/^foreign\.//;
-                last;
-            } elsif ($key =~ /^foreign\.(\w+)$/ && $value =~ /^self\.(\w+)$/) {
-                # Alternative format
-                $foreign_column = $1;
-                $self_column = $value =~ /^self\.(\w+)$/ ? $1 : undef;
-                last;
-            }
-        }
-    } elsif (!ref $cond) {
-        # String format
-        if ($cond =~ /^self\.(\w+)$/) {
-            $self_column = $1;
-            $foreign_column = 'id';  # Default
+    # Get the foreign source name
+    my $foreign_source = $rel_info->{source};
+
+    # Build the join condition
+    # For a simple belongs_to/has_many, we need to match the foreign key
+    my $join_cond = {};
+
+    if ($rel_info->{cond}) {
+        # Parse the relationship condition
+        # Format is usually { 'foreign.fk' => 'self.pk' }
+        while (my ($foreign_col, $self_col) = each %{$rel_info->{cond}}) {
+            # Extract column names (remove 'foreign.' and 'self.' prefixes)
+            $foreign_col =~ s/^foreign\.//;
+            $self_col =~ s/^self\.//;
+
+            # Get the value from this row
+            my $value = $self->get_column($self_col);
+            $join_cond->{$foreign_col} = $value;
         }
     }
 
-    croak "Could not parse relationship condition for '$rel_name'"
-        unless $self_column && $foreign_column;
+    # Merge with any additional conditions passed by the user
+    if ($cond && ref $cond eq 'HASH') {
+        $join_cond = { %$join_cond, %$cond };
+    }
 
-    # Get value from our row
-    my $value = $self->get_column($self_column);
+    $temp_schema->storage->disconnect;
 
-    my $raw_source = $rel_info->{source}
-        or croak "No source defined for relationship '$rel_name'";
-
-    my $moniker = $raw_source;
-    $moniker =~ s/.*:://;
-
-    my $search_cond = { $foreign_column => $value };
-
-    return $self->{async_db}->resultset($moniker)->search($search_cond);
+    # Return an Async ResultSet for the related source
+    return DBIx::Class::Async::ResultSet->new(
+        schema      => $schema_class,
+        async_db    => $bridge,
+        source_name => $foreign_source,
+        cond        => $join_cond,
+        attrs       => $attrs || {},
+    );
 }
-
 
 sub result_source {
     my $self = shift;
     return $self->_get_source;
 }
-
 
 sub set_column {
     my ($self, $col, $value) = @_;

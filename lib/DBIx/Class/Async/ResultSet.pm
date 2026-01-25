@@ -500,6 +500,44 @@ sub search_rs {
     return $self->search(@_);
 }
 
+sub search_related {
+    my ($self, $rel_name, $cond, $attrs) = @_;
+
+    # Use the helper to get the new configuration
+    my $new_rs = $self->search_related_rs($rel_name, $cond, $attrs);
+
+    # In an async context, search_related usually implies
+    # wanting the ResultSet object to call ->all_future on later.
+    return $new_rs;
+}
+
+sub search_related_rs {
+    my ($self, $rel_name, $cond, $attrs) = @_;
+
+    # 1. Get the source. If _source is undef, pull it from the schema
+    my $source = $self->{_source}
+              || $self->{_schema}->resultset($self->{_source_name})->result_source;
+
+    # 2. Create the Shadow RS
+    require DBIx::Class::ResultSet;
+    my $shadow_rs = DBIx::Class::ResultSet->new($source, {
+        cond  => $self->can('ident_condition') ? { $self->ident_condition } : $self->{_cond},
+        attrs => $self->{_attrs} || {},
+    });
+
+    # 3. Pivot
+    my $related_shadow = $shadow_rs->search_related($rel_name, $cond, $attrs);
+
+    # 4. Wrap with ALL required keys for your constructor
+    return DBIx::Class::Async::ResultSet->new(
+        schema      => $self->{_schema},
+        async_db    => $self->{_async_db},
+        source_name => $related_shadow->result_source->source_name,
+        cond        => $related_shadow->{cond},
+        attrs       => $related_shadow->{attrs},
+    );
+}
+
 sub find {
     my ($self, $id_or_cond) = @_;
 
@@ -586,7 +624,7 @@ sub next {
 
         $self->{_pos} //= 0;
 
-        return Future->done($self->{_rows}[$self->{_pos}++]);
+        return $self->{_rows}[$self->{_pos}++];
     });
 }
 
