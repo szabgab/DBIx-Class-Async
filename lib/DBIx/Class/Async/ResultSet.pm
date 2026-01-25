@@ -227,6 +227,105 @@ sub update_all {
     });
 }
 
+sub update_or_new {
+    my ($self, $data, $attrs) = @_;
+    $attrs //= {};
+
+    # Identify the primary key or unique constraint values for the lookup
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
+
+    return $self->find($lookup, $attrs)->then(sub {
+        my ($row) = @_;
+
+        if ($row) {
+            # Object found in DB: trigger an async UPDATE
+            return $row->update($data);
+        }
+
+        # Object NOT found: merge condition and data for a local 'new' object
+        my %new_data = ( %{$self->{_cond} || {}}, %$data );
+        my %clean_data;
+        while (my ($k, $v) = each %new_data) {
+            # Strip DBIC aliases so they don't crash the Row constructor
+            (my $clean_key = $k) =~ s/^(?:me|foreign|self)\.//;
+            $clean_data{$clean_key} = $v;
+        }
+
+        # Returns a Future wrapping the local Row object (in_storage = 0)
+        return Future->done($self->new_result(\%clean_data));
+    });
+}
+
+sub update_or_create {
+    my ($self, $data, $attrs) = @_;
+    $attrs //= {};
+
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
+
+    return $self->find($lookup, $attrs)->then(sub {
+        my ($row) = @_;
+
+        if ($row) {
+            # 1. Standard Update Path
+            return $row->update($data);
+        }
+
+        # 2. Not Found: Attempt Create
+        return $self->create($data)->catch(sub {
+            my ($error, $type) = @_;
+
+            # If it's a DB unique constraint error, someone else beat us to the insert
+            if ($type eq 'db_error' && "$error" =~ /unique constraint|already exists/i) {
+
+                # 3. Race Recovery: Re-find the winner and update them
+                return $self->find($lookup, $attrs)->then(sub {
+                    my ($recovered) = @_;
+                    return $recovered
+                        ? $recovered->update($data)
+                        : Future->fail("Race recovery failed: record vanished after conflict", "logic_error");
+                });
+            }
+
+            # Otherwise, bubble up the original error
+            return Future->fail($error, $type);
+        });
+    });
+}
+
+sub _extract_unique_lookup {
+    my ($self, $data, $attrs) = @_;
+
+    my $source = $self->result_source;
+    my $key_name = $attrs->{key} || 'primary';
+    my @unique_cols = $source->unique_constraint_columns($key_name);
+
+    # Alias-aware grep for primary check
+    if (!grep { exists $data->{$_} || exists $data->{"me.$_"} } @unique_cols) {
+        foreach my $constraint ($source->unique_constraint_names) {
+            my @cols = $source->unique_constraint_columns($constraint);
+            # Alias-aware grep for discovery loop
+            if (grep { exists $data->{$_} || exists $data->{"me.$_"} } @cols) {
+                @unique_cols = @cols;
+                last;
+            }
+        }
+    }
+
+    # Build the lookup, checking for aliases
+    my %lookup;
+    foreach my $col (@unique_cols) {
+        if (exists $data->{$col}) {
+            $lookup{$col} = $data->{$col};
+        }
+        elsif (exists $data->{"me.$col"}) {
+            $lookup{$col} = $data->{"me.$col"};
+        }
+    }
+
+    # Absolute fallback
+    return keys %lookup ? \%lookup : $data;
+}
+
 sub count {
     my ($self, $cond, $attrs) = @_;
 
@@ -402,14 +501,17 @@ sub search_rs {
 }
 
 sub find {
-    my ($self, $id) = @_;
-    warn "[PID $$] find() called with id=$id";
-    return Future->done(undef) unless defined $id;
+    my ($self, $id_or_cond) = @_;
 
-    # search_rs creates a NEW resultset limited to this ID
-    my $rs = $self->search_rs({ id => $id });
-    warn "[PID $$] find() created search_rs, _rows=" . (defined $rs->{_rows} ? ref($rs->{_rows}) || 'SCALAR:' . $rs->{_rows} : 'undef');
+    return Future->done(undef) unless defined $id_or_cond;
 
+    # If it's a HASH, use it directly.
+    # If it's a scalar, assume it's the Primary Key 'id'.
+    my $cond = ref($id_or_cond) eq 'HASH' ? $id_or_cond : { id => $id_or_cond };
+
+    warn "[PID $$] find() searching with: " . (ref $cond ? "HASH" : $cond);
+
+    my $rs = $self->search_rs($cond);
     return $rs->single;
 }
 
