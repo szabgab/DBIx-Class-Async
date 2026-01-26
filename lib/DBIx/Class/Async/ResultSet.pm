@@ -23,18 +23,19 @@ sub new {
 
     # 2. Internal blessing
     return bless {
-        _schema        => $args{schema},
-        _async_db      => $args{async_db},
-        _source_name   => $args{source_name},
-        _result_class  => $args{result_class},
-        _source        => undef,
-        _cond          => $args{cond}  || {},
-        _attrs         => $args{attrs} || {},
-        _rows          => undef,
-        _pos           => 0,
-        _pager         => $args{pager} || undef,
-        _entries       => $args{entries}       || undef,
-        _is_prefetched => $args{is_prefetched} || 0,
+        _schema          => $args{schema},
+        _schema_instance => $args{schema_instance},
+        _async_db        => $args{async_db},
+        _source_name     => $args{source_name},
+        _result_class    => $args{result_class},
+        _source          => undef,
+        _cond            => $args{cond}  || {},
+        _attrs           => $args{attrs} || {},
+        _rows            => undef,
+        _pos             => 0,
+        _pager           => $args{pager} || undef,
+        _entries         => $args{entries}       || undef,
+        _is_prefetched   => $args{is_prefetched} || 0,
      }, $class;
 }
 
@@ -45,17 +46,18 @@ sub new_result_set {
 
     # Inherit from parent if not provided in args
     my $new_obj = {
-        _async_db     => $args->{async_db}    // $self->{_async_db},
-        _source_name  => $args->{source_name} // $self->{_source_name},
-        _schema       => $args->{schema}      // $self->{_schema},
-        _result_class => $args->{result_class} // $self->{_result_class},
-        _cond         => $args->{cond}        // {},
-        _attrs        => $args->{attrs}       // {},
-        _rows         => undef,
-        _pos          => $args->{pos}         // 0,
-        _pager        => $args->{pager},
-        _entries      => $args->{entries},
-        _is_prefetched => $args->{is_prefetched} // 0,
+        _async_db        => $args->{async_db}        // $self->{_async_db},
+        _source_name     => $args->{source_name}     // $self->{_source_name},
+        _schema          => $args->{schema}          // $self->{_schema},
+        _schema_instance => $args->{schema_instance} // $self->{_schema_instance},
+        _result_class    => $args->{result_class}    // $self->{_result_class},
+        _cond            => $args->{cond}            // {},
+        _attrs           => $args->{attrs}           // {},
+        _rows            => undef,
+        _pos             => $args->{pos}             // 0,
+        _pager           => $args->{pager},
+        _entries         => $args->{entries},
+        _is_prefetched   => $args->{is_prefetched}   // 0,
     };
 
     return bless $new_obj, $class;
@@ -84,6 +86,17 @@ sub _build_payload {
         cond        => $merged_cond,
         attrs       => $merged_attrs,
     };
+}
+
+sub cursor {
+    my $self = shift;
+
+    return $self->{_schema_instance}->storage->cursor($self);
+}
+
+sub schema {
+    my $self = shift;
+    return $self->{_schema};
 }
 
 sub delete {

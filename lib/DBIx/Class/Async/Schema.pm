@@ -27,7 +27,6 @@ sub connect {
     my $schema_class = $async_options->{schema_class}
        or croak "schema_class is required in async options";
 
-    # Validation logic stays exactly as is
     my $schema_loaded = 0;
     if (eval { $schema_class->can('connect') }) {
         $schema_loaded = 1;
@@ -60,8 +59,6 @@ sub connect {
         _sources_cache => {},
     }, $class;
 
-
-    # Storage plumbing
     my $storage = DBIx::Class::Async::Storage::DBI->new(
         schema   => $self,
         async_db => $async_db,
@@ -72,15 +69,21 @@ sub connect {
     return $self;
 }
 
+sub storage {
+    my $self = shift;
+    return $self->{_storage};
+}
+
 sub resultset {
     my ($self, $source_name) = @_;
 
     croak "resultset() requires a source name" unless $source_name;
 
     return DBIx::Class::Async::ResultSet->new(
-        schema      => $self->{_async_db}->{_schema_class},
-        async_db    => $self->{_async_db},
-        source_name => $source_name,
+        schema          => $self->{_async_db}->{_schema_class},
+        schema_instance => $self,
+        async_db        => $self->{_async_db},
+        source_name     => $source_name,
     );
 }
 
@@ -120,7 +123,6 @@ sub AUTOLOAD {
     my ($method) = $AUTOLOAD =~ /([^:]+)$/;
 
     return if $method eq 'DESTROY';
-    #die "AUTOLOAD $method";
 
     if ($self->{_async_db} && exists $self->{_async_db}->{schema}) {
         my $real_schema = $self->{_async_db}->{schema};
@@ -128,10 +130,6 @@ sub AUTOLOAD {
             return $real_schema->$method(@_);
         }
     }
-
-    #if ($self->{async_db} && $self->{async_db}->can($method)) {
-    #    return $self->{async_db}->$method(@_);
-    #}
 
     croak "Method $method not found in " . ref($self);
 }
