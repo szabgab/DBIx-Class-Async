@@ -318,6 +318,22 @@ sub delete_all {
 
 ############################################################################
 
+sub first_future  { shift->first(@_) }
+
+sub first {
+    my $self = shift;
+
+    # 1. If we already have data in memory, use it!
+    if ($self->{_rows} && @{$self->{_rows}}) {
+        my $data = $self->{_rows}[0];
+        my $row = (ref($data) eq 'HASH') ? $self->_inflate_row($data) : $data;
+        return Future->done($row);
+    }
+
+    # 2. If no cache, force a LIMIT 1 query to be fast
+    return $self->search(undef, { rows => 1 })->next;
+}
+
 sub find {
     my ($self, $id_or_cond) = @_;
 
@@ -692,6 +708,9 @@ sub _get_source {
 
 ############################################################################
 
+sub single        { shift->first }
+sub single_future { shift->first }
+
 sub search {
     my ($self, $cond, $attrs) = @_;
 
@@ -785,16 +804,6 @@ sub search_related_rs {
 
 ############################################################################
 
-sub single {
-    my ($self) = @_;
-
-    my $single_rs = $self->new_result_set({
-        attrs => { %{ $self->{_attrs} || {} }, rows => 1 }
-    });
-
-    return $single_rs->next;
-}
-
 ############################################################################
 
 ############################################################################
@@ -814,7 +823,7 @@ sub next {
 
         # Inflate if it's raw data
         my $row = (ref($data) eq 'HASH')
-            ? $self->new_result($data, { in_storage => 1 })
+            ? $self->_inflate_row($data)
             : $data;
 
         return Future->done($row);
