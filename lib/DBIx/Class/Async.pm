@@ -49,34 +49,40 @@ sub _next_worker {
 }
 
 sub _call_worker {
-    my ($db, $operation, @args) = @_;
+     my ($db, $operation, @args) = @_;
 
-    warn "[PID $$] STAGE 3 (Parent): Calling worker for $operation";
+     warn "[PID $$] STAGE 3 (Parent): Calling worker for $operation";
 
-    my $worker = _next_worker($db);
-    warn "Found worker: ", ref($worker);
+     my $worker = _next_worker($db);
 
-    # This returns a Future - make sure it's the right kind
-    my $future = $worker->call(
-        args => [
-            $db->{_schema_class},
-            $db->{_connect_info},
-            $db->{_workers_config},
-            $operation,
-            @args,
-        ],
-    );
+     # 1. Start the call
+     return $worker->call(
+         args => [
+             $db->{_schema_class},
+             $db->{_connect_info},
+             $db->{_workers_config},
+             $operation,
+             @args,
+         ],
+     )->then(sub {
+         my $result = shift;
 
-    $future->on_done(sub {
-        $db->{_stats}->{_queries}++;
-    });
+         # 2. Check for worker-side caught errors
+         if (ref($result) eq 'HASH' && exists $result->{error}) {
+             $db->{_stats}->{_errors}++;
+             # Transform this "done" into a "fail"
+             return Future->fail($result->{error});
+         }
 
-    $future->on_fail(sub {
-        $db->{_stats}->{_errors}++;
-    });
-
-    warn "Returning future: ", ref($future);
-    return $future;
+         # 3. Handle actual success
+         $db->{_stats}->{_queries}++;
+         return Future->done($result);
+     }, sub {
+         # 4. Handle process-level crashes (e.g., worker died)
+         my ($error) = @_;
+         $db->{_stats}->{_errors}++;
+         return Future->fail($error);
+     });
 }
 
 sub delete {
@@ -111,10 +117,7 @@ sub count {
 
     warn "[PID $$] STAGE 2 (Parent): Bridge - sending 'count' to worker";
 
-    # Call worker and return the Future directly
-    my $future = _call_worker($db, 'count', $payload);
-    warn "Count returning future: ", ref($future);
-    return $future;
+    return _call_worker($db, 'count', $payload);
 }
 
 sub disconnect_async_db {
@@ -371,20 +374,38 @@ sub _init_workers {
 
                     warn "[PID $$] Schema from cache: " . (defined $schema ? ref($schema) : "UNDEF");
 
-                    if ($operation eq 'count') {
-                        warn "[PID $$] STAGE 6 (Worker): Performing count";
+                    if ($operation =~ /^(count|sum|max|min|avg|average)$/) {
+                        warn "[PID $$] STAGE 6 (Worker): Performing aggregate $operation";
 
                         my $source_name = $payload->{source_name};
-                        my $cond = $payload->{cond} || {};
-                        my $attrs = $payload->{attrs} || {};
-
-                        warn "[PID $$] Building resultset for source: $source_name";
+                        my $cond        = $payload->{cond}  || {};
+                        my $attrs       = $payload->{attrs} || {};
+                        my $column      = $payload->{column};
 
                         my $rs = $schema->resultset($source_name)->search($cond, $attrs);
 
-                        warn "[PID $$] Executing count...";
-                        $result = $rs->count;
-                        warn "[PID $$] Count complete: $result";
+                        # Use eval to catch DBIC errors (e.g., column doesn't exist)
+                        my $val = eval {
+                            if ($operation eq 'count') {
+                                return $column ? $rs->get_column($column)->func('COUNT') : $rs->count;
+                            }
+
+                            if ($operation =~ /^(avg|average)$/) {
+                                return $rs->get_column($column)->func('AVG');
+                            }
+
+                            return $rs->get_column($column)->$operation;
+                        };
+
+                        if ($@) {
+                            warn "[PID $$] WORKER ERROR: $@";
+                            $result = { error => $@ };
+                        } else {
+                            # IMPORTANT: Force to scalar to avoid HASH(0x...) in Parent
+                            # This stringifies potential Math::BigInt objects or references
+                            $result = defined $val ? "$val" : undef;
+                            warn "[PID $$] $operation complete: $result";
+                        }
                     }
                     elsif ($operation eq 'search') {
                         warn "[PID $$] STAGE 6 (Worker): Performing search";

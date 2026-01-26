@@ -10,6 +10,7 @@ use Future;
 use Scalar::Util 'blessed';
 use DBIx::Class::Async;
 use DBIx::Class::Async::Row;
+use DBIx::Class::Async::ResultSetColumn;
 
 use Data::Dumper;
 
@@ -73,15 +74,181 @@ sub new_result_set {
 
 ############################################################################
 
+sub all {
+    my ($self) = @_;
+
+    # 1. Return cached objects if we already have them
+    if ($self->{_rows} && ref($self->{_rows}) eq 'ARRAY') {
+        return Future->done($self->{_rows});
+    }
+
+    # 2. Handle Prefetched/Manual entries
+    if ($self->{_is_prefetched} && $self->{_entries}) {
+        $self->{_rows} = [
+            map {
+                (ref($_) && $_->isa('DBIx::Class::Async::Row'))
+                ? $_
+                : $self->new_result($_, { in_storage => 1 })
+            } @{$self->{_entries}}
+        ];
+        return Future->done($self->{_rows});
+    }
+
+    # 3. Standard Async Fetch
+    return $self->all_future->then(sub {
+        my ($rows) = @_;
+        $self->{_rows} = $rows;
+        $self->{_pos}  = 0;
+        return Future->done($rows);
+    });
+}
+
+sub all_future {
+    my $self = shift;
+
+    return DBIx::Class::Async::all($self->{_async_db}, {
+        source_name => $self->{_source_name},
+        cond        => $self->{_cond},
+        attrs       => $self->{_attrs},
+    })->then(sub {
+        my $rows_data = shift;
+
+        if (!ref($rows_data) || ref($rows_data) ne 'ARRAY') {
+            return Future->done([]);
+        }
+
+        my @objects = map {
+            $self->new_result($_, { in_storage => 1 })
+        } @$rows_data;
+
+        return Future->done(\@objects);
+    });
+}
+
+sub as_query {
+    my $self = shift;
+
+    my $bridge       = $self->{_async_db};
+    my $schema_class = $bridge->{_schema_class};
+
+    unless ($schema_class->can('resultset')) {
+        eval "require $schema_class" or die "as_query: $@";
+    }
+
+    # Silence the "Generic Driver" warnings for the duration of this method
+    local $SIG{__WARN__} = sub {
+        warn @_ unless $_[0] =~ /undetermined_driver|sql_limit_dialect|GenericSubQ/
+    };
+
+    unless ($bridge->{_metadata_schema}) {
+        $bridge->{_metadata_schema} = $schema_class->connect('dbi:NullP:');
+    }
+
+    # SQL is generated lazily; warnings often trigger here or at as_query()
+    my $real_rs = $bridge->{_metadata_schema}
+                         ->resultset($self->{_source_name})
+                         ->search($self->{_cond}, $self->{_attrs});
+
+    return $real_rs->as_query;
+}
+
+############################################################################
+
 sub cursor {
     my $self = shift;
 
     return $self->{_schema_instance}->storage->cursor($self);
 }
 
-sub schema {
+sub create {
+    my ($self, $data) = @_;
+
+    # Merge conditions (Relationship context)
+    my %to_insert = ( %{$self->{_cond} || {}}, %$data );
+
+    # Clean prefixes (e.g., 'me.id' or 'foreign.user_id')
+    my %final_data;
+    while (my ($k, $v) = each %to_insert) {
+        my $clean_key = $k;
+        $clean_key =~ s/^(?:foreign|self|me)\.//;
+        $final_data{$clean_key} = $v;
+    }
+
+    return DBIx::Class::Async::create(
+        $self->{_async_db}, {
+            source_name => $self->{_source_name},
+            data => \%final_data
+        }
+    )->then(sub {
+        my $db_data = shift;
+
+        return Future->done($self->new_result($db_data, { in_storage => 1 }));
+    });
+}
+
+sub count {
+    my ($self, $cond, $attrs) = @_;
+
+    my $db = $self->{_async_db};
+
+    my $payload = $self->_build_payload($cond, $attrs);
+
+    warn "[PID $$] STAGE 1 (Parent): Dispatching count";
+
+    # This returns a Future that will be resolved by the worker
+    return DBIx::Class::Async::count($db, $payload);
+}
+
+sub count_future {
     my $self = shift;
-    return $self->{_schema};
+    my $db   = $self->{_async_db};
+
+    return DBIx::Class::Async::count($db, {
+        source_name => $self->{_source_name},
+        cond        => $self->{_cond},
+        attrs       => $self->{_attrs},
+    });
+}
+
+sub count_literal {
+    my ($self, $sql_fragment, @bind) = @_;
+
+    # 1. search_literal() creates a NEW ResultSet instance.
+    # 2. Because we fixed search_literal/new_result_set, this new RS
+    #    already shares the same _async_db and _schema_instance.
+    # 3. We then chain the count() call which returns the Future.
+
+    return $self->search_literal($sql_fragment, @bind)->count;
+}
+
+sub count_rs {
+    my ($self, $cond, $attrs) = @_;
+
+    # By calling $self->search, we guarantee the new RS
+    # inherits the pinned _async_db and _schema_instance.
+    return $self->search($cond, {
+        %{ $attrs || {} },
+        select => [ { count => '*' } ],
+        as     => [ 'count' ],
+    });
+}
+
+sub count_total {
+    my ($self, $cond, $attrs) = @_;
+
+    # 1. Merge incoming parameters with existing ResultSet state
+    my %merged_cond  = ( %{ $self->{_cond}  || {} }, %{ $cond  || {} } );
+    my %merged_attrs = ( %{ $self->{_attrs} || {} }, %{ $attrs || {} } );
+
+    # 2. Strip slicing/ordering attributes to get the absolute total
+    delete @merged_attrs{qw(rows offset page order_by)};
+
+    # 3. Use the static call exactly like your other count() implementations
+    return DBIx::Class::Async::count($self->{_async_db}, {
+        source_name => $self->{_source_name},
+        cond        => \%merged_cond,
+        attrs       => \%merged_attrs,
+    });
 }
 
 ############################################################################
@@ -152,30 +319,113 @@ sub delete_all {
 
 ############################################################################
 
-sub create {
-    my ($self, $data) = @_;
+sub find {
+    my ($self, $id_or_cond) = @_;
 
-    # Merge conditions (Relationship context)
-    my %to_insert = ( %{$self->{_cond} || {}}, %$data );
+    # 1. Immediate return for undef
+    return Future->done(undef) unless defined $id_or_cond;
 
-    # Clean prefixes (e.g., 'me.id' or 'foreign.user_id')
-    my %final_data;
-    while (my ($k, $v) = each %to_insert) {
-        my $clean_key = $k;
-        $clean_key =~ s/^(?:foreign|self|me)\.//;
-        $final_data{$clean_key} = $v;
-    }
+    # 2. Build condition
+    my $cond = ref($id_or_cond) eq 'HASH' ? $id_or_cond : { id => $id_or_cond };
 
-    return DBIx::Class::Async::create(
-        $self->{_async_db}, {
-            source_name => $self->{_source_name},
-            data => \%final_data
+    # 3. Create a new ResultSet state with the condition
+    # search() uses our generic new_result_set() translator
+    my $rs = $self->search($cond);
+
+    # 4. Delegate execution to single()
+    return $rs->single;
+}
+
+sub find_or_new {
+    my ($self, $data, $attrs) = @_;
+    $attrs //= {};
+
+    # 1. Identify what makes this record unique
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
+
+    # 2. Call our newly ported find()
+    return $self->find($lookup, $attrs)->then(sub {
+        my ($row) = @_;
+
+        # If found, return it immediately
+        return Future->done($row) if $row;
+
+        # 3. Otherwise, prepare data for a new local object
+        # We merge existing constraints with the provided data
+        my %new_data = ( %{$self->{_cond} || {}}, %$data );
+        my %clean_data;
+        while (my ($k, $v) = each %new_data) {
+            (my $clean_key = $k) =~ s/^(?:me|foreign|self)\.//;
+            $clean_data{$clean_key} = $v;
         }
-    )->then(sub {
-        my $db_data = shift;
 
-        return Future->done($self->new_result($db_data, { in_storage => 1 }));
+        # 4. Return a "new" result object (local memory only)
+        # Note: new_result should handle passing the _async_db to the row
+        return Future->done($self->new_result(\%clean_data));
     });
+}
+
+sub find_or_create {
+    my ($self, $data, $attrs) = @_;
+    $attrs //= {};
+
+    my $lookup = $self->_extract_unique_lookup($data, $attrs);
+
+    # 1. First attempt: Find
+    return $self->find($lookup, $attrs)->then(sub {
+        my ($row) = @_;
+        return Future->done($row) if $row;
+
+        # 2. Second attempt: Create
+        # This calls your async create() which goes through the bridge
+        return $self->create($data)->catch(sub {
+            my ($error) = @_;
+
+            # 3. Race Condition Recovery
+            # If the error is about a unique constraint, someone else inserted it
+            # between our 'find' and 'create' calls.
+            if ("$error" =~ /unique constraint|already exists/i) {
+                warn "[PID $$] Race condition detected in find_or_create, retrying find";
+                return $self->find($lookup, $attrs);
+            }
+
+            # If it's a real error (connection, etc.), fail forward
+            return Future->fail($error);
+        });
+    });
+}
+
+############################################################################
+
+sub get {
+    my $self = shift;
+    # 1. Check for inflated objects first
+    return $self->{_rows} if $self->{_rows} && ref($self->{_rows}) eq 'ARRAY';
+
+    # 2. Check for raw data awaiting inflation
+    return $self->{_entries} if $self->{_entries} && ref($self->{_entries}) eq 'ARRAY';
+
+    return [];
+}
+
+sub get_cache {
+    my $self = shift;
+    # Align with your all() logic: Return _rows if populated, otherwise undef
+    return $self->{_rows} if $self->{_rows} && ref($self->{_rows}) eq 'ARRAY';
+
+    # Optional: If you want get_cache to be "smart" like your line 85,
+    # you could return _entries here, but usually get_cache implies inflated rows.
+    return undef;
+}
+
+sub get_column {
+    my ($self, $column) = @_;
+
+    return DBIx::Class::Async::ResultSetColumn->new(
+        resultset => $self,
+        column    => $column,
+        async_db  => $self->{_async_db},
+    );
 }
 
 ############################################################################
@@ -352,125 +602,8 @@ sub is_paged {
 
 ############################################################################
 
-sub count {
-    my ($self, $cond, $attrs) = @_;
-
-    my $db = $self->{_async_db};
-
-    my $payload = $self->_build_payload($cond, $attrs);
-
-    warn "[PID $$] STAGE 1 (Parent): Dispatching count";
-
-    # This returns a Future that will be resolved by the worker
-    return DBIx::Class::Async::count($db, $payload);
-}
-
-sub count_future {
-    my $self = shift;
-    my $db   = $self->{_async_db};
-
-    return DBIx::Class::Async::count($db, {
-        source_name => $self->{_source_name},
-        cond        => $self->{_cond},
-        attrs       => $self->{_attrs},
-    });
-}
-
-sub count_literal {
-    my ($self, $sql_fragment, @bind) = @_;
-
-    # 1. search_literal() creates a NEW ResultSet instance.
-    # 2. Because we fixed search_literal/new_result_set, this new RS
-    #    already shares the same _async_db and _schema_instance.
-    # 3. We then chain the count() call which returns the Future.
-
-    return $self->search_literal($sql_fragment, @bind)->count;
-}
-
-sub count_rs {
-    my ($self, $cond, $attrs) = @_;
-
-    # By calling $self->search, we guarantee the new RS
-    # inherits the pinned _async_db and _schema_instance.
-    return $self->search($cond, {
-        %{ $attrs || {} },
-        select => [ { count => '*' } ],
-        as     => [ 'count' ],
-    });
-}
-
-sub count_total {
-    my ($self, $cond, $attrs) = @_;
-
-    # 1. Merge incoming parameters with existing ResultSet state
-    my %merged_cond  = ( %{ $self->{_cond}  || {} }, %{ $cond  || {} } );
-    my %merged_attrs = ( %{ $self->{_attrs} || {} }, %{ $attrs || {} } );
-
-    # 2. Strip slicing/ordering attributes to get the absolute total
-    delete @merged_attrs{qw(rows offset page order_by)};
-
-    # 3. Use the static call exactly like your other count() implementations
-    return DBIx::Class::Async::count($self->{_async_db}, {
-        source_name => $self->{_source_name},
-        cond        => \%merged_cond,
-        attrs       => \%merged_attrs,
-    });
-}
-
 ############################################################################
 
-sub all {
-    my ($self) = @_;
-
-    # 1. Return cached objects if we already have them
-    if ($self->{_rows} && ref($self->{_rows}) eq 'ARRAY') {
-        return Future->done($self->{_rows});
-    }
-
-    # 2. Handle Prefetched/Manual entries
-    if ($self->{_is_prefetched} && $self->{_entries}) {
-        $self->{_rows} = [
-            map {
-                (ref($_) && $_->isa('DBIx::Class::Async::Row'))
-                ? $_
-                : $self->new_result($_, { in_storage => 1 })
-            } @{$self->{_entries}}
-        ];
-        return Future->done($self->{_rows});
-    }
-
-    # 3. Standard Async Fetch
-    return $self->all_future->then(sub {
-        my ($rows) = @_;
-        $self->{_rows} = $rows;
-        $self->{_pos}  = 0;
-        return Future->done($rows);
-    });
-}
-
-sub all_future {
-    my $self = shift;
-
-    return DBIx::Class::Async::all($self->{_async_db}, {
-        source_name => $self->{_source_name},
-        cond        => $self->{_cond},
-        attrs       => $self->{_attrs},
-    })->then(sub {
-        my $rows_data = shift;
-
-        if (!ref($rows_data) || ref($rows_data) ne 'ARRAY') {
-            return Future->done([]);
-        }
-
-        my @objects = map {
-            $self->new_result($_, { in_storage => 1 })
-        } @$rows_data;
-
-        return Future->done(\@objects);
-    });
-}
-
-############################################################################
 
 sub new_result {
     my ($self, $data, $attrs) = @_;
@@ -620,22 +753,6 @@ sub search_related_rs {
 
 ############################################################################
 
-sub find {
-    my ($self, $id_or_cond) = @_;
-
-    # 1. Immediate return for undef
-    return Future->done(undef) unless defined $id_or_cond;
-
-    # 2. Build condition
-    my $cond = ref($id_or_cond) eq 'HASH' ? $id_or_cond : { id => $id_or_cond };
-
-    # 3. Create a new ResultSet state with the condition
-    # search() uses our generic new_result_set() translator
-    my $rs = $self->search($cond);
-
-    # 4. Delegate execution to single()
-    return $rs->single;
-}
 
 ############################################################################
 
@@ -650,33 +767,6 @@ sub single {
 }
 
 ############################################################################
-
-sub as_query {
-    my $self = shift;
-
-    my $bridge       = $self->{_async_db};
-    my $schema_class = $bridge->{_schema_class};
-
-    unless ($schema_class->can('resultset')) {
-        eval "require $schema_class" or die "as_query: $@";
-    }
-
-    # Silence the "Generic Driver" warnings for the duration of this method
-    local $SIG{__WARN__} = sub {
-        warn @_ unless $_[0] =~ /undetermined_driver|sql_limit_dialect|GenericSubQ/
-    };
-
-    unless ($bridge->{_metadata_schema}) {
-        $bridge->{_metadata_schema} = $schema_class->connect('dbi:NullP:');
-    }
-
-    # SQL is generated lazily; warnings often trigger here or at as_query()
-    my $real_rs = $bridge->{_metadata_schema}
-                         ->resultset($self->{_source_name})
-                         ->search($self->{_cond}, $self->{_attrs});
-
-    return $real_rs->as_query;
-}
 
 ############################################################################
 
@@ -740,6 +830,13 @@ sub reset_stats {
         $self->{_async_db}->{_stats}->{$key} = 0;
     }
     return $self;
+}
+
+############################################################################
+
+sub schema {
+    my $self = shift;
+    return $self->{_schema};
 }
 
 ############################################################################

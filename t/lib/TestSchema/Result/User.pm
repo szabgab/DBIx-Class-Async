@@ -21,6 +21,10 @@ __PACKAGE__->add_columns(
         size        => 255,
         is_nullable => 1,
     },
+    age  => {
+        data_type => "integer",
+        is_nullable => 1
+    },
     active => {
         data_type     => 'integer',
         is_nullable   => 0,
