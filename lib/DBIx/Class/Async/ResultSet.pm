@@ -64,24 +64,28 @@ sub new_result {
         in_storage      => $storage_hint // 0,
     );
 
-    # 2. Dynamic Class Hijacking (Preserved logic)
-    my $target_class   = $self->{_result_class};
+    # 2. Dynamic Class Hijacking
+    # We must check the override (_result_class) FIRST.
+    my $target_class = $self->{_attrs}->{result_class} || $self->{_result_class};
     my $base_row_class = ref($row);
 
     if ($target_class && $target_class ne $base_row_class) {
-        # Create a unique name for the hybrid class
-        my $anon_class = "DBIx::Class::Async::Anon::" . ($base_row_class . "_" . $target_class) =~ s/::/_/gr;
+        # Re-generate the anon class name based on the CORRECT target
+        my $safe_target = $target_class =~ s/::/_/gr;
+        my $anon_class = "DBIx::Class::Async::Anon::${safe_target}";
 
         no strict 'refs';
         unless (@{"${anon_class}::ISA"}) {
-            eval "require $target_class" unless $target_class->can('new');
-            # Multi-inheritance: Async capabilities + Result class methods
+            unless ($target_class->can('can')) {
+                 eval "require $target_class" or die "Could not load $target_class: $@";
+            }
+
+            # IMPORTANT: Reverse the order here.
             @{"${anon_class}::ISA"} = ($base_row_class, $target_class);
         }
         bless $row, $anon_class;
 
-        # Re-run accessor installation for the new hijacked class
-        $row->_ensure_accessors;
+        $row->_ensure_accessors if $row->can('_ensure_accessors');
     }
 
     return $row;
@@ -712,17 +716,21 @@ sub result_class {
     my $self = shift;
 
     if (@_) {
-        # Clone check: In DBIC, changing attributes usually returns a new RS
-        # but if you're modifying in place:
-        $self->{_attrs}->{result_class} = shift;
-        return $self;
+        my $new_class = shift;
+        # Clone the RS to allow chaining: $rs->result_class('...')->search(...)
+        my $cloned = { %$self };
+        $cloned->{_attrs} = { %{ $self->{_attrs} || {} } }; # Shallow copy attributes
+        $cloned->{_attrs}->{result_class} = $new_class;
+        return bless $cloned, ref $self;
     }
 
-    # Resolve hierarchy:
-    # 1. Look in the Async attributes (_attrs)
-    # 2. Fall back to the ResultSource default
+    # Hierarchy:
+    # 1. Attribute override
+    # 2. Schema metadata (via source name)
+    # 3. Default fallback
     return $self->{_attrs}->{result_class}
-        || $self->result_source->result_class;
+        || $self->{_result_class} # Value passed during construction
+        || 'DBIx::Class::Core';
 }
 
 sub related_resultset {

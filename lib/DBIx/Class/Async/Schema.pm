@@ -76,6 +76,22 @@ sub connect {
     return $self;
 }
 
+sub class {
+    my ($self, $source_name) = @_;
+
+    croak("source_name required") unless defined $source_name;
+
+    # Fetch metadata (this uses your existing _sources_cache)
+    my $source = eval { $self->source($source_name) };
+
+    if ($@ || !$source) {
+        croak("No such source '$source_name'");
+    }
+
+    # Return the result class string (e.g., 'TestSchema::Result::User')
+    return $source->{result_class};
+}
+
 sub clone {
     my $self = shift;
     my %args = @_;
@@ -184,12 +200,13 @@ sub resultset {
         $self->{_sources_cache}{$source_name} = $source;
     }
 
+    my $result_class = $self->class($source_name);
     # 2. Create the new Async ResultSet
     return DBIx::Class::Async::ResultSet->new(
         source_name     => $source_name,
         schema_instance => $self,              # Access to _record_metric
         async_db        => $self->{_async_db}, # Access to _call_worker
-        result_class    => $source->{result_class} || 'DBIx::Class::Core',
+        result_class    => $result_class,
     );
 }
 

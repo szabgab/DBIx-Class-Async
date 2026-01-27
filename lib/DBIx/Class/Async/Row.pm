@@ -712,19 +712,19 @@ sub update_or_insert {
     }
 }
 
-
 sub AUTOLOAD {
     my $self = shift;
 
     our $AUTOLOAD;
     my ($method) = $AUTOLOAD =~ /([^:]+)$/;
 
-    # 1. Immediate exit for core/Future methods
-    return if $method =~ /^(?:DESTROY|AWAIT_\w+|can|isa|then|get|on_\w+|failure|else)$/;
+    # 1. Immediate exit for core/Future/Perl methods
+    return if $method =~ /^(?:DESTROY|AWAIT_\w+|can|isa|then|get|on_\w+|failure|else|CLONE)$/;
 
-    my $source = $self->_get_source;
+    # 2. Handle Columns (Getter/Setter)
+    # Ensure _get_source retrieves the metadata from the parent's schema cache
+    my $source = eval { $self->_get_source };
 
-    # 2. Handle Columns (Getter/Setter with Debugging)
     if ($source && $source->has_column($method)) {
         no strict 'refs';
         no warnings 'redefine';
@@ -755,14 +755,10 @@ sub AUTOLOAD {
 
             my $raw = $inner_self->get_column($method);
             if ($col_info->{inflate} && defined $raw) {
-
-                # Check if the raw value is already in the 'inflated' format
-                # This is a safety check for DBs that return inflated strings
                 my $inflated = $col_info->{inflate}->($raw, $inner_self);
 
-                # If inflation resulted in a double-prefix (e.g. mailto:mailto:)
-                # then the $raw was already inflated. Use $raw instead.
-                if (!ref($inflated) && $inflated =~ /^mailto:mailto:/) {
+                # Handle potential double-inflation edge cases
+                if (!ref($inflated) && defined($inflated) && $inflated =~ /^mailto:mailto:/) {
                     $inner_self->{_inflated}{$method} = $raw;
                     return $raw;
                 }
@@ -771,36 +767,48 @@ sub AUTOLOAD {
                 return $inflated;
             }
             return $raw;
-
         };
 
-        *{ref($self) . "::$method"} = $accessor;
+        # Install into the specific class (likely the Anon hybrid class)
+        my $target_class = ref($self);
+        *{"${target_class}::$method"} = $accessor;
         return $self->$method(@_);
     }
 
     # 3. Handle Relationships
-    my $rel_info;
     if ($source && $source->can('relationship_info')) {
-        $rel_info = $source->relationship_info($method);
-    }
-
-    if ($rel_info) {
-        # We found a relationship! Install our async version into the class
-        no strict 'refs';
-        no warnings 'redefine';
-        my $class = ref($self);
-        *{"${class}::$method"} = sub {
-            my ($inner_self, @args) = @_;
-            return $inner_self->_fetch_relationship_async($method, $rel_info, @args);
-        };
-
-        # Now call the version we just installed
-        return $self->$method(@_);
+        my $rel_info = $source->relationship_info($method);
+        if ($rel_info) {
+            no strict 'refs';
+            no warnings 'redefine';
+            my $class = ref($self);
+            *{"${class}::$method"} = sub {
+                my ($inner_self, @args) = @_;
+                return $inner_self->_fetch_relationship_async($method, $rel_info, @args);
+            };
+            return $self->$method(@_);
+        }
     }
 
     # 4. Fallback for non-column data already in the buffer
     if (exists $self->{_data}{$method} && !@_) {
         return $self->{_data}{$method};
+    }
+
+    # ----------------------------------------------------------------------
+    # 4.5 THE HIJACK GUARD
+    # ----------------------------------------------------------------------
+    # If we reached here, Async::Row doesn't recognize this as a DB column.
+    # We check if a custom class further up the @ISA chain has this method.
+
+    # 'can' looks through the entire inheritance tree (MRO)
+    my $next_method = $self->can($method);
+
+    if ($next_method && $next_method != \&AUTOLOAD) {
+        # We found the real method (e.g., My::Custom::User::hello_name)!
+        # Use goto to jump into it, preserving the caller context.
+        unshift @_, $self;
+        goto &$next_method;
     }
 
     # 5. Exception handling
@@ -1169,6 +1177,5 @@ sub _is_internal {
 
     return $col =~ $INTERNAL_KEYS;
 }
-
 
 1; # End of DBIx::Class::Async::Row
