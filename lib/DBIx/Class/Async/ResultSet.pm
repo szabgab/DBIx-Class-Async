@@ -780,8 +780,6 @@ sub search_related_rs {
     );
 }
 
-############################################################################
-
 sub single        { shift->first }
 
 sub single_future { shift->first }
@@ -801,6 +799,43 @@ sub stats {
 sub schema {
     my $self = shift;
     return $self->{_schema};
+}
+
+sub slice {
+    my ($self, $first, $last) = @_;
+    require Carp;
+
+    # 1. Validation logic (remains the same)
+    Carp::croak("slice requires two arguments (first and last index)")
+        unless defined $first && defined $last;
+    Carp::croak("slice indices must be non-negative integers")
+        if $first < 0 || $last < 0;
+    Carp::croak("first index must be less than or equal to last index")
+        if $first > $last;
+
+    # 2. Calculate pagination parameters
+    my $offset = $first;
+    my $rows   = $last - $first + 1;
+
+    # 3. Create the limited ResultSet
+    # Since search() already handles cloning and attr merging, use it!
+    my $sliced_rs = $self->search(undef, {
+        offset => $offset,
+        rows   => $rows,
+    });
+
+    # 4. Context-aware return
+    if (!wantarray) {
+        # Scalar context: Return the RS for further chaining
+        return $sliced_rs;
+    }
+
+    # List context: This is tricky in Async.
+    # In standard DBIC, slice() in list context executes immediately.
+    # To keep your current test style, we'll return the results of 'all'.
+    # Note: If your 'all' returns a Future, list context users must
+    # be aware they are getting a single Future object, not the rows yet.
+    return $sliced_rs->all;
 }
 
 ############################################################################
