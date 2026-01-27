@@ -715,6 +715,13 @@ sub reset {
 
 ############################################################################
 
+# alias for result_source()
+
+sub source {
+    my $self = shift;
+    return $self->_get_source;
+}
+
 sub source_name {
     my $self = shift;
     return $self->{_source_name};
