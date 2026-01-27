@@ -9,6 +9,10 @@ use lib 'lib', 't/lib';
 
 use DBIx::Class::Async::Schema;
 
+BEGIN {
+    $SIG{__WARN__} = sub {};
+}
+
 # Helper to resolve Futures
 sub wait_for {
     my $future = shift;

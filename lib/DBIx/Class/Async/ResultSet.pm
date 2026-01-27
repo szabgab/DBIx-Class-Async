@@ -129,7 +129,7 @@ sub all {
     if ($self->{_is_prefetched} && $self->{_entries}) {
         $self->{_rows} = [
             map {
-                (ref($_) && $_->isa('DBIx::Class::Row')) # Standard DBIC row check
+                (blessed($_) && $_->isa('DBIx::Class::Row'))
                 ? $_
                 : $self->_inflate_row($_)
             } @{$self->{_entries}}
@@ -868,6 +868,29 @@ sub slice {
     # Note: If your 'all' returns a Future, list context users must
     # be aware they are getting a single Future object, not the rows yet.
     return $sliced_rs->all;
+}
+
+sub set_cache {
+    my ($self, $cache) = @_;
+
+    require Carp;
+    Carp::croak("set_cache expects an arrayref of entries/objects")
+        unless defined $cache && ref $cache eq 'ARRAY';
+
+    # 1. Store as raw entries
+    # This feeds line 129 in your 'all' method
+    $self->{_entries} = $cache;
+
+    # 2. Mark as prefetched
+    # This triggers the inflation logic in line 129
+    $self->{_is_prefetched} = 1;
+
+    # 3. Clear any existing inflated rows and reset position
+    # This ensures that if the cache is updated, the inflation happens again
+    $self->{_rows} = undef;
+    $self->{_pos}  = 0;
+
+    return $self;
 }
 
 ############################################################################
