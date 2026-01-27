@@ -167,29 +167,48 @@ sub create_async_db {
         $cache_ttl = DEFAULT_CACHE_TTL;
     }
 
-    # This is the "plain hashref" - No bless!
+    # 1. Extract Column Metadata (Inflators/Deflators)
+    # We do this before creating the hashref so we can include it
+    my $custom_inflators = {};
+    if ($schema_class->can('sources')) {
+        foreach my $source_name ($schema_class->sources) {
+            my $source = $schema_class->source($source_name);
+            foreach my $col ($source->columns) {
+                my $info = $source->column_info($col);
+                if ($info->{deflate} || $info->{inflate}) {
+                    $custom_inflators->{$source_name}{$col} = {
+                        deflate => $info->{deflate},
+                        inflate => $info->{inflate},
+                    };
+                }
+            }
+        }
+    }
+
+    # 2. Build the async_db state hashref
     my $async_db = {
-        _schema_class     => $schema_class,
-        _connect_info     => $connect_info,
-        _loop             => $args{loop} || IO::Async::Loop->new,
-        _workers          => [],
-        _workers_config   => {
+        _schema_class      => $schema_class,
+        _connect_info      => $connect_info,
+        _custom_inflators  => $custom_inflators,
+        _loop              => $args{loop} || IO::Async::Loop->new,
+        _workers           => [],
+        _workers_config    => {
             _count          => $workers,
             _query_timeout  => $args{query_timeout} || DEFAULT_QUERY_TIMEOUT,
             _on_connect_do  => $args{on_connect_do} || [],
         },
-        _cache            => $args{cache} || _build_default_cache($cache_ttl),
-        _cache_ttl        => $cache_ttl,
-        _enable_retry     => $args{enable_retry} // 0,
-        _retry_config     => {
+        _cache             => $args{cache} || _build_default_cache($cache_ttl),
+        _cache_ttl         => $cache_ttl,
+        _enable_retry      => $args{enable_retry} // 0,
+        _retry_config      => {
             _max_retries  => $args{max_retries} || DEFAULT_RETRIES,
             _delay        => $args{retry_delay} || 1,
             _factor       => 2,
         },
-        _enable_metrics   => $args{enable_metrics} // 0,
-        _is_connected     => 1,
-        _worker_idx       => 0,
-        _stats            => {
+        _enable_metrics    => $args{enable_metrics} // 0,
+        _is_connected      => 1,
+        _worker_idx        => 0,
+        _stats             => {
             _queries      => 0,
             _errors       => 0,
             _cache_hits   => 0,
@@ -199,9 +218,9 @@ sub create_async_db {
         },
     };
 
-
-    _init_metrics($async_db) if $async_db->{enable_metrics};
+    _init_metrics($async_db) if $async_db->{_enable_metrics};
     _init_workers($async_db);
+
     if (my $interval = $args{health_check} // HEALTH_CHECK_INTERVAL) {
         _start_health_checks($async_db, $interval);
     }
@@ -442,9 +461,13 @@ sub _init_workers {
                         # Perform the actual DBIC insert
                         my $row = $schema->resultset($source_name)->create($data);
 
-                        # IMPORTANT: Return the inflated columns so the Parent gets
-                        # the Auto-Increment ID and any DB-side defaults.
-                        $result = _serialise_row_with_prefetch($row, undef, {});
+                        # Sync with DB to get the Auto-Increment ID
+                        # Some DBD drivers need this to populate the primary key in the object
+                        $row->discard_changes;
+
+                        # Use get_inflated_columns for a clean, flat HashRef
+                        # This bypasses the complexity of the prefetch serializer
+                        $result = { $row->get_inflated_columns };
                     }
                     elsif ($operation eq 'delete') {
                         my $source_name = $payload->{source_name};
@@ -481,6 +504,22 @@ sub _init_workers {
                             $result = $val;
                         }
                         return $result;
+                    }
+                    elsif ($operation eq 'find') {
+                        my $source_name = $payload->{source_name};
+                        my $query       = $payload->{query};
+                        my $attrs       = $payload->{attrs} || {};
+
+                        my $row = $schema->resultset($source_name)->find($query, $attrs);
+
+                        if ($row) {
+                            $result = _serialise_row_with_prefetch($row, undef, $attrs);
+                        } else {
+                            $result = undef;
+                        }
+                    }
+                    elsif ($operation eq 'ping') {
+                        $result = "pong";
                     }
                     else {
                         die "Unknown operation: $operation";

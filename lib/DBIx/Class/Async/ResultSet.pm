@@ -7,12 +7,11 @@ use v5.14;
 
 use Carp;
 use Future;
+use Data::Dumper;
 use Scalar::Util 'blessed';
 use DBIx::Class::Async;
 use DBIx::Class::Async::Row;
 use DBIx::Class::Async::ResultSetColumn;
-
-use Data::Dumper;
 
 sub new {
     my ($class, %args) = @_;
@@ -149,11 +148,17 @@ sub all {
 sub all_future {
     my $self = shift;
 
-    return DBIx::Class::Async::all($self->{_async_db}, {
-        source_name => $self->{_source_name},
-        cond        => $self->{_cond},
-        attrs       => $self->{_attrs},
-    })->then(sub {
+    my $db      = $self->{_async_db};
+    my $payload = $self->_build_payload();
+    $payload->{source_name} = $self->{_source_name};
+    $payload->{cond}        = $self->{_cond};
+    $payload->{attrs}       = $self->{_attrs};
+
+    return DBIx::Class::Async::_call_worker(
+        $db,
+        'search',
+        $payload,
+    )->then(sub {
         my $rows_data = shift;
 
         if (!ref($rows_data) || ref($rows_data) ne 'ARRAY') {
@@ -203,28 +208,60 @@ sub cursor {
 }
 
 sub create {
-    my ($self, $data) = @_;
+    my ($self, $raw_data) = @_;
+    my $db          = $self->{_async_db};
+    my $source_name = $self->{_source_name};
 
-    # Merge conditions (Relationship context)
-    my %to_insert = ( %{$self->{_cond} || {}}, %$data );
+    # 1. Fetch inflators
+    my $inflators = $db->{_custom_inflators}{$source_name} || {};
 
-    # Clean prefixes (e.g., 'me.id' or 'foreign.user_id')
-    my %final_data;
-    while (my ($k, $v) = each %to_insert) {
+    # 2. Deflate the incoming data (Parent Side)
+    my %deflated_data;
+    while (my ($k, $v) = each %$raw_data) {
         my $clean_key = $k;
         $clean_key =~ s/^(?:foreign|self|me)\.//;
-        $final_data{$clean_key} = $v;
+
+        if ($inflators->{$clean_key} && $inflators->{$clean_key}{deflate}) {
+            $v = $inflators->{$clean_key}{deflate}->($v);
+        }
+        $deflated_data{$clean_key} = $v;
     }
 
-    return DBIx::Class::Async::create(
-        $self->{_async_db}, {
-            source_name => $self->{_source_name},
-            data => \%final_data
-        }
-    )->then(sub {
-        my $db_data = shift;
+    # 3. Leverage your specialized payload builder
+    # We pass the deflated data as the 'cond' or 'data'
+    # depending on how your worker expects 'create' to look.
+    my $payload = $self->_build_payload(\%deflated_data);
 
-        return Future->done($self->new_result($db_data, { in_storage => 1 }));
+    # Ensure the worker sees this as the 'data' key for insertion
+    $payload->{data} = \%deflated_data;
+
+    # 4. Dispatch with correct signature
+    return DBIx::Class::Async::_call_worker(
+        $db,
+        'create',
+        $payload
+    )->then(sub {
+        my $db_row = shift;
+        return Future->done(undef) unless $db_row;
+
+        # 5. Inflation of return data
+        for my $col (keys %$inflators) {
+            if (exists $db_row->{$col} && $inflators->{$col}{inflate}) {
+                $db_row->{$col} = $inflators->{$col}{inflate}->($db_row->{$col});
+            }
+        }
+
+        # 6. Hydrate into an Async-aware Row
+        my $obj = $self->result_source->result_class->new({});
+        $obj->{_data}          = { %$db_row };
+        $obj->{_in_storage}    = 1;
+        $obj->{_dirty}         = {};
+        $obj->{_source_name}   = $source_name;
+        $obj->{_result_source} = $self->result_source;
+        $obj->{_async_db}      = $db;
+
+        bless $obj, 'DBIx::Class::Async::Row';
+        return Future->done($obj);
     });
 }
 
@@ -931,25 +968,39 @@ sub set_cache {
 ############################################################################
 
 sub update {
-    my ($self, $data) = @_;
+    my $self = shift;
+    my ($cond, $updates);
 
-    # PATH A: Fast Path
-    # Triggered if there are no complex attributes (like rows/offset),
-    if ( keys %{$self->{_attrs} || {}} == 0 && $self->{_cond} && keys %{$self->{_cond}} ) {
-        warn "[PID $$] update() - Taking Path A (Fast Path)";
-        return DBIx::Class::Async::update(
-            $self->{_async_db}, {
-                source_name => $self->{_source_name},
-                cond        => $self->{_cond},
-                updates     => $data,
-            }
-        );
+    # Logic to handle both:
+    #   ->update({ col => val })
+    #   ->update({ id => 1 }, { col => val })
+    if (@_ > 1) {
+        ($cond, $updates) = @_;
+    } else {
+        $updates = shift;
+        $cond    = $self->{_cond}; # Use the ResultSet's internal filter
     }
 
-    # PATH B: Safe Path
-    # Use the ID-mapping strategy to respect LIMIT/OFFSET/Group By.
-    warn "[PID $$] update() - Taking Path B (Safe Path via update_all)";
-    return $self->update_all($data);
+    my $db = $self->{_async_db};
+    my $inflators = $db->{_custom_inflators}{ $self->{_source_name} } || {};
+
+    # Ensure nested Hashes are turned back into Strings for the database
+    foreach my $col (keys %$updates) {
+        if ($inflators->{$col} && $inflators->{$col}{deflate}) {
+            $updates->{$col} = $inflators->{$col}{deflate}->($updates->{$col});
+        }
+    }
+
+    # Dispatch via the main Async module's update handler
+    # This uses the resolved $cond we figured out above
+    return DBIx::Class::Async::update(
+        $db,
+        {
+            source_name => $self->{_source_name},
+            cond        => $cond,
+            updates     => $updates,
+        }
+    );
 }
 
 sub update_all {
@@ -1181,16 +1232,25 @@ sub _inflate_row {
     my ($self, $hash) = @_;
     return undef unless $hash;
 
-    # 1. Create the base row object
-    # DBIC handles the columns defined in the ResultSource
+    # Apply Column Inflation
+    my $db          = $self->{_async_db};
+    my $source_name = $self->{_source_name};
+    my $inflators   = $db->{_custom_inflators}{$source_name} || {};
+
+    foreach my $col (keys %$inflators) {
+        if (exists $hash->{$col} && $inflators->{$col}{inflate}) {
+            # This turns your JSON string back into a HASH ref!
+            $hash->{$col} = $inflators->{$col}{inflate}->($hash->{$col});
+        }
+    }
+
+    # Create the base row object
     my $row = $self->new_result($hash);
     $row->in_storage(1);
 
-    # 2. Inject Relationship Data
-    # This is the "secret sauce" for prefetch to work in the parent
+    # Inject Relationship Data (already perfect)
     for my $rel ($self->result_source->relationships) {
         if (exists $hash->{$rel}) {
-            # We place the nested data directly into DBIC's internal cache
             $row->{_relationship_data}{$rel} = $hash->{$rel};
         }
     }

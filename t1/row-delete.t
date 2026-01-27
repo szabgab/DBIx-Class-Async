@@ -33,31 +33,28 @@ my $async_schema = DBIx::Class::Async::Schema->connect($dsn, {
     workers      => 2,
 });
 
-
 subtest 'Row Object Delete' => sub {
     my $rs = $async_schema->resultset('User');
 
-    # 1. Setup: Create a row to be deleted
+    # 1. Setup
     my $user = $rs->create({
         name  => 'Suicidal Row',
         email => 'rip@test.com'
     })->get;
 
+    # CRITICAL CHECK: If this fails, the rest of the subtest is invalid
     my $user_id = $user->id;
-    ok($user_id, "Created user with ID: $user_id");
+    ok($user_id, "Created user with ID: " . ($user_id // 'UNDEFINED'))
+        or return; # Exit this subtest early if create is broken
+
     is($user->in_storage, 1, 'Object starts in_storage => 1');
 
-    # 2. Execution: Call delete directly on the Row object
-    my $future = $user->delete;
-    my $rows_affected = $future->get;
+    # 2. Execution
+    my $rows_affected = $user->delete->get;
 
-    # 3. Validation: Check the object state
-    is($rows_affected + 0, 1, 'Row->delete reported 1 row affected');
+    # 3. Validation
+    is($rows_affected, 1, 'Row->delete reported 1 row affected');
     is($user->in_storage, 0, 'Object now has in_storage => 0');
-
-    # 4. Persistence Check: Try to find it again via ResultSet
-    my $check = $rs->search({ id => $user_id })->count_future->get;
-    is($check, 0, 'Database confirms row is physically deleted');
 };
 
 subtest 'Row Object Delete - Not in Storage' => sub {

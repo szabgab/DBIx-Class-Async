@@ -4,6 +4,10 @@ use Test::More;
 use File::Temp qw(tempfile);
 use lib 'lib', 't/lib';
 
+BEGIN {
+    $SIG{__WARN__} = sub {};
+}
+
 # 1. Setup Database
 my ($fh, $filename) = tempfile(SUFFIX => '.db', UNLINK => 1);
 my $dsn = "dbi:SQLite:dbname=$filename";

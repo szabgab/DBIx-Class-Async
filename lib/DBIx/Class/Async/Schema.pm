@@ -57,6 +57,9 @@ sub connect {
 
     my $native_schema = $schema_class->connect(@args);
 
+    # Populate the inflator map
+    $async_db->{_custom_inflators} = $class->_build_inflator_map($native_schema);
+
     my $self = bless {
         _async_db      => $async_db,
         _native_schema => $native_schema,
@@ -71,6 +74,52 @@ sub connect {
     $self->{_storage} = $storage;
 
     return $self;
+}
+
+sub sync_metadata {
+    my ($self) = @_;
+
+    my $async_db = $self->{_async_db}; # Direct access
+    my @futures;
+
+    # Ping every worker in the pool
+    for (1 .. $async_db->{_workers_config}->{_count}) {
+        push @futures, DBIx::Class::Async::_call_worker($async_db, 'ping', {});
+    }
+
+    return Future->wait_all(@futures);
+}
+
+sub inflate_column {
+    my ($self, $source_name, $column, $handlers) = @_;
+
+    my $schema = $self->{_native_schema};
+
+    my @known_sources = $schema->sources;
+    warn "[PID $$] Parent Schema class: " . ref($schema);
+
+    # Attempt lookup
+    my $source = eval { $schema->source($source_name) };
+
+    if (!$source) {
+        warn "[PID $$] Source '$source_name' not found. Attempting force-load via resultset...";
+        eval { $schema->resultset($source_name) };
+        $source = eval { $schema->source($source_name) };
+    }
+
+    croak "Could not find result source for '$source_name' in Parent process."
+        unless $source;
+
+    # Apply the handlers to the Parent's schema instance
+    my $col_info = $source->column_info($column);
+    $source->add_column($column => {
+        %$col_info,
+        inflate => $handlers->{inflate},
+        deflate => $handlers->{deflate},
+    });
+
+    # Registry for Parent-side inflation of results coming back from Worker
+    $self->{_async_db}{_custom_inflators}{$source_name}{$column} = $handlers;
 }
 
 sub _record_metric {
@@ -193,6 +242,29 @@ sub sources {
     $temp_schema->storage->disconnect;
 
     return @sources;
+}
+
+sub _build_inflator_map {
+    my ($class, $schema) = @_;
+
+    my $map = {};
+    foreach my $source_name ($schema->sources) {
+        warn "[DEBUG] Scanning source: $source_name";
+        my $source = $schema->source($source_name);
+        foreach my $col ($source->columns) {
+            my $info = $source->column_info($col);
+
+            # Extract both inflate and deflate coderefs
+            if ($info->{deflate} || $info->{inflate}) {
+                $map->{$source_name}{$col} = {
+                    deflate => $info->{deflate},
+                    inflate => $info->{inflate},
+                };
+            }
+        }
+    }
+
+    return $map;
 }
 
 sub AUTOLOAD {

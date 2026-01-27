@@ -4,6 +4,10 @@ use Test::More;
 use File::Temp qw(tempfile);
 use lib 'lib', 't/lib';
 
+BEGIN {
+    $SIG{__WARN__} = sub {};
+}
+
 # Helper to resolve Futures
 sub wait_for {
     my $future = shift;
