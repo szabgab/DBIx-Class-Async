@@ -621,6 +621,23 @@ sub prefetch {
 
 ############################################################################
 
+sub result_class {
+    my $self = shift;
+
+    if (@_) {
+        # Clone check: In DBIC, changing attributes usually returns a new RS
+        # but if you're modifying in place:
+        $self->{_attrs}->{result_class} = shift;
+        return $self;
+    }
+
+    # Resolve hierarchy:
+    # 1. Look in the Async attributes (_attrs)
+    # 2. Fall back to the ResultSource default
+    return $self->{_attrs}->{result_class}
+        || $self->result_source->result_class;
+}
+
 sub related_resultset {
     my ($self, $rel_name) = @_;
 
