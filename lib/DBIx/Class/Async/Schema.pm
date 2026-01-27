@@ -76,19 +76,66 @@ sub connect {
     return $self;
 }
 
-sub sync_metadata {
-    my ($self) = @_;
+sub clone {
+    my $self = shift;
+    my %args = @_;
 
-    my $async_db = $self->{_async_db}; # Direct access
-    my @futures;
+    # 1. Determine worker count for the new pool
+    my $worker_count = $args{workers}
+        || $self->{_async_db}->{_workers_config}->{_count}
+        || 2;
 
-    # Ping every worker in the pool
-    for (1 .. $async_db->{_workers_config}->{_count}) {
-        push @futures, DBIx::Class::Async::_call_worker($async_db, 'ping', {});
-    }
+    # 2. Re-create the async engine
+    my $new_async_db = DBIx::Class::Async->create_async_db(
+        schema_class   => $self->schema_class,
+        connect_info   => $self->{_async_db}->{_connect_info},
+        workers        => $worker_count,
+        loop           => $self->{_async_db}->{_loop},
+        # Pass through other configs like metrics/retry if they exist
+        enable_metrics => $self->{_async_db}->{_enable_metrics},
+        enable_retry   => $self->{_async_db}->{_enable_retry},
+    );
 
-    return Future->wait_all(@futures);
+    # 3. Build the new schema object
+    my $new_self = bless {
+        %$self,
+        _async_db      => $new_async_db,
+        _sources_cache => {},
+    }, ref $self;
+
+    # 4. Re-attach a fresh storage wrapper
+    $new_self->{_storage} = DBIx::Class::Async::Storage::DBI->new(
+        schema   => $new_self,
+        async_db => $new_async_db,
+    );
+
+    return $new_self;
 }
+
+
+############################################################################
+
+sub deploy {
+    my ($self, $sqlt_args, $dir) = @_;
+
+    my $async_db = $self->{_async_db};
+
+    return DBIx::Class::Async::_call_worker(
+        $async_db, 'deploy', [ $sqlt_args, $dir ],
+    )->then(sub {
+        my ($res) = @_;
+
+        # Catch DBI/SQL error
+        if (ref $res eq 'HASH' && $res->{error}) {
+            return Future->fail($res->{error}, 'dbic_async_deploy');
+        }
+
+        # Return the schema object
+        return Future->done($self);
+    });
+}
+
+############################################################################
 
 sub inflate_column {
     my ($self, $source_name, $column, $handlers) = @_;
@@ -121,6 +168,123 @@ sub inflate_column {
     # Registry for Parent-side inflation of results coming back from Worker
     $self->{_async_db}{_custom_inflators}{$source_name}{$column} = $handlers;
 }
+
+############################################################################
+
+sub resultset {
+    my ($self, $source_name) = @_;
+
+    # 1. Check our cache for the source metadata
+    # (In DBIC, a 'source' contains column info, class names, etc.)
+    my $source = $self->{_sources_cache}{$source_name};
+
+    unless ($source) {
+        # Fetch metadata from the real DBIx::Class::Schema class
+        $source = $self->_resolve_source($source_name);
+        $self->{_sources_cache}{$source_name} = $source;
+    }
+
+    # 2. Create the new Async ResultSet
+    return DBIx::Class::Async::ResultSet->new(
+        source_name     => $source_name,
+        schema_instance => $self,              # Access to _record_metric
+        async_db        => $self->{_async_db}, # Access to _call_worker
+        result_class    => $source->{result_class} || 'DBIx::Class::Core',
+    );
+}
+
+############################################################################
+
+sub sync_metadata {
+    my ($self) = @_;
+
+    my $async_db = $self->{_async_db}; # Direct access
+    my @futures;
+
+    # Ping every worker in the pool
+    for (1 .. $async_db->{_workers_config}->{_count}) {
+        push @futures, DBIx::Class::Async::_call_worker($async_db, 'ping', {});
+    }
+
+    return Future->wait_all(@futures);
+}
+
+sub schema_class {
+    my ($self) = @_;
+
+    return $self->{_async_db}->{_schema_class};
+}
+
+sub source_ {
+    my ($self, $source_name) = @_;
+
+    unless (exists $self->{_sources_cache}{$source_name}) {
+        my $source = eval { $self->{_native_schema}->source($source_name) };
+
+        croak("No such source '$source_name'") if $@ || !$source;
+
+        $self->{_sources_cache}{$source_name} = $source;
+    }
+    return $self->{_sources_cache}{$source_name};
+}
+
+sub sources_ {
+    my $self = shift;
+    return $self->{_native_schema}->sources;
+}
+
+sub storage {
+    my $self = shift;
+    return $self->{_storage}; # Your Async storage wrapper
+}
+
+
+sub source {
+    my ($self, $source_name) = @_;
+
+    # 1. Retrieve the cached entry
+    my $cached = $self->{_sources_cache}{$source_name};
+
+    # 2. Check if we need to (re)fetch:
+    #    Either we have no entry, or it's a raw HASH (autovivification artifact)
+    if (!$cached || !blessed($cached)) {
+
+        # Clean up any "ghost" hash before re-fetching
+        delete $self->{_sources_cache}{$source_name};
+
+        # 3. Use the persistent provider to keep ResultSource objects alive
+        $self->{_metadata_provider} ||= do {
+            my $class = $self->{_async_db}->{_schema_class};
+            eval "require $class" or die "Could not load schema class $class: $@";
+            $class->connect(@{$self->{_async_db}->{_connect_info}});
+        };
+
+        # 4. Fetch the source and validate its blessing
+        my $source_obj = eval { $self->{_metadata_provider}->source($source_name) };
+
+        if (blessed($source_obj)) {
+            $self->{_sources_cache}{$source_name} = $source_obj;
+        } else {
+            return undef;
+        }
+    }
+
+    return $self->{_sources_cache}{$source_name};
+}
+
+sub sources {
+    my $self = shift;
+
+    my $schema_class = $self->{_async_db}->{_schema_class};
+    my $connect_info = $self->{_async_db}->{_connect_info};
+    my $temp_schema = $schema_class->connect(@{$connect_info});
+    my @sources = $temp_schema->sources;
+    $temp_schema->storage->disconnect;
+
+    return @sources;
+}
+
+############################################################################
 
 sub _record_metric {
     my ($self, $type, $name, @args) = @_;
@@ -172,78 +336,6 @@ sub _resolve_source {
     };
 }
 
-sub storage {
-    my $self = shift;
-    return $self->{_storage};
-}
-
-sub resultset {
-    my ($self, $source_name) = @_;
-
-    # 1. Check our cache for the source metadata
-    # (In DBIC, a 'source' contains column info, class names, etc.)
-    my $source = $self->{_sources_cache}{$source_name};
-
-    unless ($source) {
-        # Fetch metadata from the real DBIx::Class::Schema class
-        $source = $self->_resolve_source($source_name);
-        $self->{_sources_cache}{$source_name} = $source;
-    }
-
-    # 2. Create the new Async ResultSet
-    return DBIx::Class::Async::ResultSet->new(
-        source_name     => $source_name,
-        schema_instance => $self,              # Access to _record_metric
-        async_db        => $self->{_async_db}, # Access to _call_worker
-        result_class    => $source->{result_class} || 'DBIx::Class::Core',
-    );
-}
-
-sub source {
-    my ($self, $source_name) = @_;
-
-    # 1. Retrieve the cached entry
-    my $cached = $self->{_sources_cache}{$source_name};
-
-    # 2. Check if we need to (re)fetch:
-    #    Either we have no entry, or it's a raw HASH (autovivification artifact)
-    if (!$cached || !blessed($cached)) {
-
-        # Clean up any "ghost" hash before re-fetching
-        delete $self->{_sources_cache}{$source_name};
-
-        # 3. Use the persistent provider to keep ResultSource objects alive
-        $self->{_metadata_provider} ||= do {
-            my $class = $self->{_async_db}->{_schema_class};
-            eval "require $class" or die "Could not load schema class $class: $@";
-            $class->connect(@{$self->{_async_db}->{_connect_info}});
-        };
-
-        # 4. Fetch the source and validate its blessing
-        my $source_obj = eval { $self->{_metadata_provider}->source($source_name) };
-
-        if (blessed($source_obj)) {
-            $self->{_sources_cache}{$source_name} = $source_obj;
-        } else {
-            return undef;
-        }
-    }
-
-    return $self->{_sources_cache}{$source_name};
-}
-
-sub sources {
-    my $self = shift;
-
-    my $schema_class = $self->{_async_db}->{_schema_class};
-    my $connect_info = $self->{_async_db}->{_connect_info};
-    my $temp_schema = $schema_class->connect(@{$connect_info});
-    my @sources = $temp_schema->sources;
-    $temp_schema->storage->disconnect;
-
-    return @sources;
-}
-
 sub _build_inflator_map {
     my ($class, $schema) = @_;
 
@@ -266,6 +358,8 @@ sub _build_inflator_map {
 
     return $map;
 }
+
+############################################################################
 
 sub AUTOLOAD {
     my $self = shift;

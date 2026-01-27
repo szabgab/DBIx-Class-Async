@@ -518,6 +518,18 @@ sub _init_workers {
                             $result = undef;
                         }
                     }
+                    elsif ($operation eq 'deploy') {
+                        my ($sqlt_args, $dir) = (ref $payload eq 'ARRAY') ? @$payload : ($payload);
+                        eval {
+                            $schema->deploy($sqlt_args // {}, $dir);
+                        };
+                        if ($@) {
+                            $result = { error => "Deploy operation failed: $@" };
+                        }
+                        else {
+                            $result = { success => 1 };
+                        }
+                    }
                     elsif ($operation eq 'ping') {
                         $result = "pong";
                     }
@@ -547,8 +559,6 @@ sub _init_workers {
         };
     }
 }
-
-
 
 sub _build_default_cache {
     my ($ttl) = @_;
