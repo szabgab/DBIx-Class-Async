@@ -397,8 +397,8 @@ sub _init_workers {
                         warn "[PID $$] STAGE 6 (Worker): Performing aggregate $operation";
 
                         my $source_name = $payload->{source_name};
-                        my $cond        = $payload->{cond}  || {};
-                        my $attrs       = $payload->{attrs} || {};
+                        my $cond        = $payload->{cond}  // {};
+                        my $attrs       = $payload->{attrs} // {};
                         my $column      = $payload->{column};
 
                         my $rs = $schema->resultset($source_name)->search($cond, $attrs);
@@ -528,7 +528,7 @@ sub _init_workers {
 
                 if ($@) {
                     warn "[PID $$] Worker execution error: $@";
-                    die $@;
+                    $result = { __async_error => "$@" };
                 }
 
                 warn "[PID $$] Worker returning result type: " . ref($result);

@@ -640,15 +640,64 @@ sub _do_populate {
     croak("data must be an arrayref") unless ref $data eq 'ARRAY';
     return Future->done([]) unless @$data;
 
-    # Reuse your existing bridge logic
-    my $payload = $self->_build_payload;
-    return DBIx::Class::Async::_call_worker(
-        $self->{_async_db},
-        $operation,
-        {
-            %$payload, data => $data,
+    # 1. Build payload and STRICTLY validate
+    my $payload = $self->_build_payload();
+
+    croak("Failed to build payload: _build_payload returned undef")
+        unless ref $payload eq 'HASH';
+
+    croak("Missing source_name in ResultSet")
+        unless $payload->{source_name} || $self->{_source_name};
+
+    # 2. Deflate the data for the Worker
+    my $db          = $self->{_async_db};
+    my $source_name = $self->{_source_name};
+    my $inflators   = $db->{_custom_inflators}{$source_name} || {};
+
+    # 1. Deflate the data for the Worker
+    my @deflated_data;
+
+    # Check if this is the "Array of Arrays" format (first element is an arrayref)
+    if (ref $data->[0] eq 'ARRAY') {
+        # This is the header-style populate: [['col1', 'col2'], [val1, val2]]
+        # We pass it through raw, as the Worker should handle the mapping,
+        # but we still want to keep our deflation logic if possible.
+        @deflated_data = @$data;
+    }
+    else {
+        # This is the "Array of Hashes" format
+        foreach my $row_data (@$data) {
+            croak("populate row must be a HASH ref") unless ref $row_data eq 'HASH';
+
+            my %deflated_row;
+            while (my ($k, $v) = each %$row_data) {
+                my $clean_key = $k;
+                $clean_key =~ s/^(?:foreign|self|me)\.//;
+
+                if ($inflators->{$clean_key} && $inflators->{$clean_key}{deflate}) {
+                    $v = $inflators->{$clean_key}{deflate}->($v);
+                }
+                $deflated_row{$clean_key} = $v;
+            }
+            push @deflated_data, \%deflated_row;
         }
-    );
+    }
+
+    # 3. Patch and Dispatch
+    $payload->{source_name} //= $source_name;
+    $payload->{data}          = \@deflated_data;
+
+    return DBIx::Class::Async::_call_worker(
+        $db,
+        $operation,
+        $payload
+    )->then(sub {
+        my $results = shift;
+        return Future->done([]) unless $results && ref $results eq 'ARRAY';
+
+        my @objects = map { $self->_inflate_row($_) } @$results;
+        return Future->done(\@objects);
+    });
 }
 
 sub prefetch {
@@ -1099,12 +1148,51 @@ sub update_or_create {
 
 ############################################################################
 
+sub _build_payload {
+    my ($self, $cond, $attrs, $is_count_op) = @_;
+
+    # 1. Condition Merging (Improved Literal Awareness)
+    my $base_cond = $self->{_cond};
+    my $new_cond  = $cond;
+    my $merged_cond;
+
+    if (ref($base_cond) eq 'HASH' && ref($new_cond) eq 'HASH') {
+        $merged_cond = { %$base_cond, %$new_cond };
+    }
+    elsif (ref($new_cond) && ref($new_cond) ne 'HASH') {
+        $merged_cond = $new_cond; # Literal SQL takes priority
+    }
+    else {
+        $merged_cond = $new_cond // $base_cond // {};
+    }
+
+    # 2. Attribute Merging (Harden against non-HASH attrs)
+    my $merged_attrs = (ref($self->{_attrs}) eq 'HASH' && ref($attrs) eq 'HASH')
+        ? { %{$self->{_attrs}}, %{$attrs // {}} }
+        : ($attrs // $self->{_attrs} // {});
+
+    # 3. Only apply the Subquery Alias if we are specifically doing a COUNT
+    # and there is a limit/offset involved.
+    if ( $is_count_op
+        && ( $merged_attrs->{rows}
+             || $merged_attrs->{offset}
+             || $merged_attrs->{limit} ) ) {
+        $merged_attrs->{alias}       //= 'subquery_for_count';
+        $merged_attrs->{is_subquery} //= 1;
+    }
+
+    return {
+        source_name => $self->{_source_name},
+        cond        => $merged_cond,
+        attrs       => $merged_attrs,
+    };
+}
+
 sub _find_reverse_relationship {
     my ($self, $source, $rel_source, $forward_rel) = @_;
 
     unless (ref $rel_source && $rel_source->can('relationships')) {
-        require Carp;
-        Carp::confess("Critical Error: _find_reverse_relationship expected a ResultSource object but got: " . ($rel_source // 'undef'));
+        confess("Critical Error: _find_reverse_relationship expected a ResultSource object but got: " . ($rel_source // 'undef'));
     }
 
     my @rel_names    = $rel_source->relationships;
@@ -1158,8 +1246,6 @@ sub _find_reverse_relationship {
     return undef;
 }
 
-############################################################################
-
 sub _extract_unique_lookup {
     my ($self, $data, $attrs) = @_;
 
@@ -1192,40 +1278,6 @@ sub _extract_unique_lookup {
 
     # Absolute fallback
     return keys %lookup ? \%lookup : $data;
-}
-
-sub _build_payload {
-    my ($self, $cond, $attrs) = @_;
-
-    # 1. Base Merge with Total Literal Awareness
-    my $merged_cond;
-
-    # If either the CURRENT condition or the NEW condition is a literal,
-    # we generally can't merge them as hashes.
-    if (ref($self->{_cond}) eq 'REF' || ref($self->{_cond}) eq 'SCALAR') {
-        $merged_cond = $self->{_cond}; # Prioritize existing literal
-    }
-    elsif (ref($cond) eq 'REF' || ref($cond) eq 'SCALAR') {
-        $merged_cond = $cond;          # Prioritize new literal
-    }
-    else {
-        # Both are safe to treat as hashes (or undef)
-        $merged_cond = { %{ $self->{_cond} || {} }, %{ $cond || {} } };
-    }
-
-    my $merged_attrs = { %{ $self->{_attrs} || {} }, %{ $attrs || {} } };
-
-    # 2. The "Slice" Special Case (remains the same)
-    if ( $merged_attrs->{rows} || $merged_attrs->{offset} || $merged_attrs->{limit} ) {
-        $merged_attrs->{alias}       //= 'subquery_for_count';
-        $merged_attrs->{is_subquery} //= 1;
-    }
-
-    return {
-        source_name => $self->{_source_name},
-        cond        => $merged_cond,
-        attrs       => $merged_attrs,
-    };
 }
 
 sub _inflate_row {

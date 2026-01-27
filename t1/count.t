@@ -105,7 +105,6 @@ subtest 'Testing error metrics' => sub {
     # Trigger a guaranteed SQL syntax error
     my $bad_rs = $rs->search_literal('THIS IS NOT VALID SQL');
 
-    note "Executing guaranteed bad query...";
     my $future = $bad_rs->count;
 
     # Use on_ready to ensure the loop ALWAYS stops
