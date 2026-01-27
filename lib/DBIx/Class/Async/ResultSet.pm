@@ -715,6 +715,11 @@ sub reset {
 
 ############################################################################
 
+sub source_name {
+    my $self = shift;
+    return $self->{_source_name};
+}
+
 sub search {
     my ($self, $cond, $attrs) = @_;
 
