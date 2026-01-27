@@ -146,13 +146,14 @@ sub all {
 }
 
 sub all_future {
-    my $self = shift;
+    my ($self, $cond, $attrs) = @_;
 
     my $db      = $self->{_async_db};
     my $payload = $self->_build_payload();
     $payload->{source_name} = $self->{_source_name};
-    $payload->{cond}        = $self->{_cond};
-    $payload->{attrs}       = $self->{_attrs};
+
+    $payload->{cond}  = $cond  // $self->{_cond}  // {};
+    $payload->{attrs} = $attrs // $self->{_attrs} // {};
 
     return DBIx::Class::Async::_call_worker(
         $db,
@@ -846,6 +847,8 @@ sub search {
         is_prefetched => 0,
     });
 }
+
+sub search_future { shift->all_future(@_)  }
 
 sub search_literal {
     my ($self, $sql_fragment, @bind) = @_;
