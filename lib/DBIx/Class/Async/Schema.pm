@@ -298,6 +298,17 @@ sub resultset {
 
 ############################################################################
 
+sub set_default_context {
+    my $self = shift;
+
+    # No-op for compatibility with external libraries
+    # that expect a standard DBIC Schema interface.
+    # In an Async world, we avoid global context to prevent
+    # cross-talk between event loop cycles.
+
+    return $self;
+}
+
 sub schema_version {
     my $self  = shift;
 
@@ -405,6 +416,37 @@ sub sources {
 
 ############################################################################
 
+sub txn_begin {
+    my $self = shift;
+
+    # We return the future so the caller can wait for the 'BEGIN' to finish
+    return DBIx::Class::Async::_call_worker(
+        $self->{_async_db},
+        'txn_begin',
+        {}
+    );
+}
+
+sub txn_commit {
+    my $self = shift;
+
+    return DBIx::Class::Async::_call_worker(
+        $self->{_async_db},
+        'txn_commit',
+        {}
+    );
+}
+
+sub txn_rollback {
+    my $self = shift;
+
+    return DBIx::Class::Async::_call_worker(
+        $self->{_async_db},
+        'txn_rollback',
+        {}
+    );
+}
+
 sub txn_do {
     my ($self, $steps) = @_;
 
@@ -457,6 +499,34 @@ sub txn_batch {
 
         return Future->done($result);
     });
+}
+
+############################################################################
+
+sub unregister_source {
+    my ($self, $source_name) = @_;
+
+    croak("source_name is required") unless defined $source_name;
+
+    # 1. Reach into the manager hashref (the "Async DB" manager)
+    my $class = $self->{_async_db}->{_schema_class};
+    unless ($class) {
+        croak("schema_class is not defined in manager for " . ref($self));
+    }
+
+    # 2. Local Cache Cleanup
+    # Even if the file stays on disk, we prevent the Parent from
+    # attempting to generate new ResultSets for this source.
+    delete $self->{_sources_cache}->{$source_name};
+
+    # 3. Class-Level Cleanup
+    # This prevents any future workers (or re-initializations)
+    # from seeing this source definition.
+    if ($class->can('unregister_source')) {
+        $class->unregister_source($source_name);
+    }
+
+    return $self;
 }
 
 ############################################################################

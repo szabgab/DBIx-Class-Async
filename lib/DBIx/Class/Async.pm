@@ -638,6 +638,18 @@ sub _init_workers {
                         $result = $@ ? { error => "Transaction failed: $@", success => 0 }
                                      : $txn_result;
                     }
+                    elsif ($operation eq 'txn_begin') {
+                        $schema->storage->txn_begin;
+                        $result = { success => 1 };
+                    }
+                    elsif ($operation eq 'txn_commit') {
+                        $schema->storage->txn_commit;
+                        $result = { success => 1 };
+                    }
+                    elsif ($operation eq 'txn_rollback') {
+                        $schema->storage->txn_rollback;
+                        $result = { success => 1 };
+                    }
                     elsif ($operation eq 'ping') {
                         $result = "pong";
                     }
