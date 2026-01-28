@@ -229,6 +229,50 @@ sub populate {
 
 ############################################################################
 
+sub register_class {
+    my ($self, $source_name, $result_class) = @_;
+
+    croak("source_name and result_class required")
+        unless $source_name && $result_class;
+
+    # 1. Load the class in the Parent process
+    # We do this to extract metadata (columns, relationships)
+    unless ($result_class->can('result_source_instance')) {
+        eval "require $result_class";
+        if ($@) {
+            croak("Failed to load Result class '$result_class': $@");
+        }
+    }
+
+    # 2. Get the ResultSource instance from the class
+    # This contains the column definitions and table name
+    my $source = eval { $result_class->result_source_instance };
+    if ($@ || !$source) {
+        croak("Class '$result_class' does not appear to be a valid DBIx::Class Result class");
+    }
+
+    # 3. Register the source
+    # This will populate your { _sources_cache } or internal metadata map
+    return $self->register_source($source_name, $source);
+}
+
+sub register_source {
+    my ($self, $source_name, $source) = @_;
+
+    # 1. Update Parent Instance
+    $self->{_sources_cache}->{$source_name} = $source;
+
+    # 2. Track this for Workers
+    # Store the 'source' metadata so we can send it to workers if needed
+    $self->{_dynamic_sources}->{$source_name} = $source;
+
+    # 3. Class-level registration (for future local instances)
+    my $schema_class = $self->{_schema_class};
+    $schema_class->register_source($source_name, $source) if $schema_class;
+
+    return $source;
+}
+
 sub resultset {
     my ($self, $source_name) = @_;
 
