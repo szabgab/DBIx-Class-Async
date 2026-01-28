@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use utf8;
 
+use File::Temp;
 use Test::More;
 use Test::Exception;
 
@@ -17,33 +18,20 @@ use IO::Async::Loop;
 use DBIx::Class::Async;
 use DBIx::Class::Async::Schema;
 
-my $db_file = "test_$$.db";
-unlink $db_file if -e $db_file;
+my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
 
-my $dbh = DBI->connect("dbi:SQLite:dbname=$db_file", "", "", {
-    RaiseError => 1,
-    PrintError => 0,
-});
+# 1. Initialise the Async Schema
+my $schema = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file",
+    undef, undef, {},
+    { workers => 2, schema_class => 'TestSchema' }
+);
 
-$dbh->do("
-    CREATE TABLE users (
-        id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        name   VARCHAR(50) NOT NULL,
-        email  VARCHAR(100),
-        active INTEGER NOT NULL DEFAULT 1
-    )
-");
+# 2. Get the loop from the internal async_db object
+my $loop = $schema->{_async_db}->{_loop};
 
-$dbh->do("
-    CREATE TABLE orders (
-        id      INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        amount  DECIMAL(10,2) NOT NULL,
-        status  VARCHAR(20) NOT NULL DEFAULT 'pending'
-    )
-");
-
-$dbh->disconnect;
+# 3. Deploy automatically!
+$loop->await($schema->deploy);
 
 # Test 1: Basic schema connection
 subtest 'Basic schema connection' => sub {
@@ -184,10 +172,6 @@ subtest 'Search and count' => sub {
     );
 
     my $user_rs = $schema->resultset('User');
-
-    # Create test data
-    $user_rs->create({ name => 'Search Test 1', email => 's1@test.com', active => 1 })->get;
-    $user_rs->create({ name => 'Search Test 2', email => 's2@test.com', active => 0 })->get;
 
     my $count_before = $user_rs->count->get;  # count() returns Future, so we need ->get
 
