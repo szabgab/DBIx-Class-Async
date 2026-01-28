@@ -142,13 +142,9 @@ sub deploy {
     )->then(sub {
         my ($res) = @_;
 
-        # Catch DBI/SQL error
-        if (ref $res eq 'HASH' && $res->{error}) {
-            return Future->fail($res->{error}, 'dbic_async_deploy');
-        }
-
-        # Return the schema object
-        return $res;
+        # Return the result (usually { success => 1 } or similar)
+        # or return $self if you want to allow chaining.
+        return Future->done($res);
     });
 }
 
