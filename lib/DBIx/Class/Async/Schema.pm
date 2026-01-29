@@ -83,14 +83,14 @@ sub connect {
 
     my $native_schema = $schema_class->connect(@args);
 
-    # Populate the inflator map
-    $async_db->{_custom_inflators} = $class->_build_inflator_map($native_schema);
-
     my $self = bless {
         _async_db      => $async_db,
         _native_schema => $native_schema,
         _sources_cache => {},
     }, $class;
+
+    # Populate the inflator map
+    $async_db->{_custom_inflators} = $self->_build_inflator_map($native_schema);
 
     my $storage = DBIx::Class::Async::Storage::DBI->new(
         schema   => $self,
@@ -447,6 +447,7 @@ sub sources {
     my $connect_info = $self->{_async_db}->{_connect_info};
     my $temp_schema = $schema_class->connect(@{$connect_info});
     my @sources = $temp_schema->sources;
+
     $temp_schema->storage->disconnect;
 
     return @sources;
@@ -598,7 +599,11 @@ sub _record_metric {
 sub _resolve_source {
     my ($self, $source_name) = @_;
 
+    croak "Missing source name." unless defined $source_name;
+
     my $schema_class = $self->{_async_db}{_schema_class};
+
+    croak "Schema class not found." unless defined $schema_class;
 
     # 1. Ask the main DBIC Schema class for the source metadata
     # We call this on the class name, not an instance, to stay "light"
@@ -620,7 +625,7 @@ sub _resolve_source {
 }
 
 sub _build_inflator_map {
-    my ($class, $schema) = @_;
+    my ($self, $schema) = @_;
 
     my $map = {};
     foreach my $source_name ($schema->sources) {

@@ -2,31 +2,54 @@
 
 use strict;
 use warnings;
-use utf8;
 
 use Test::More;
 use Test::Deep;
+use File::Temp;
 use Test::Exception;
+
+use lib 't/lib';
+use TestSchema;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
-use lib 't/lib';
-use TestDB;
 
-my $db_file      = setup_test_db();
-my $loop         = IO::Async::Loop->new;
-my $schema_class = get_test_schema_class();
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
+);
+
+$schema->await($schema->deploy({ add_drop_table => 1 }));
+
+my $result = $schema->txn_batch([
+    {
+        type      => 'create',
+        resultset => 'User',
+        data      => { name   => 'Alice',
+                       email  => 'alice@example.com',
+                       active => 1  },
+    },
+    {
+        type      => 'create',
+        resultset => 'User',
+        data      => { name   => 'Bob',
+                       email  => 'bob@example.com',
+                       active => 1 },
+    },
+]);
+
+$schema->await($result);
+
+
 
 # Test 1: Full workflow
 subtest 'Complete workflow' => sub {
-
-    my $schema = DBIx::Class::Async::Schema->connect(
-        "dbi:SQLite:dbname=$db_file",
-        undef,
-        undef,
-        { sqlite_unicode => 1 },
-        { workers => 2, schema_class => $schema_class, loop => $loop }
-    );
 
     # 1. Search with pagination - returns hashrefs, not Row objects
     my $users_rs = $schema->resultset('User')
@@ -109,28 +132,17 @@ subtest 'Complete workflow' => sub {
         ->search({ active => 0 })
         ->update({ active => 1 })
         ->get;
-
-    # 11. Disconnect
-    lives_ok { $schema->disconnect } 'Disconnect works';
 };
 
 # Test 2: Async behavior
 subtest 'Async behavior' => sub {
 
-    my $schema = DBIx::Class::Async::Schema->connect(
-        "dbi:SQLite:dbname=$db_file",
-        undef,
-        undef,
-        { sqlite_unicode => 1 },
-        { workers => 2, schema_class => $schema_class, loop => $loop }
+    my @futures = (
+        $schema->resultset('User')->count_future,
+        $schema->resultset('User')->search({ active => 1 })->count_future,
+        $schema->resultset('User')->search({ active => 0 })->count_future,
+        $schema->resultset('Order')->count_future,
     );
-
-    my @futures;
-
-    push @futures, $schema->resultset('User')->count_future;
-    push @futures, $schema->resultset('User')->search({ active => 1 })->count_future;
-    push @futures, $schema->resultset('User')->search({ active => 0 })->count_future;
-    push @futures, $schema->resultset('Order')->count_future;
 
     # Wait for all
     my $wait_future = Future->wait_all(@futures);
@@ -156,9 +168,8 @@ subtest 'Async behavior' => sub {
 
     pass('All async operations completed');
 
-    $schema->disconnect;
 };
 
-teardown_test_db();
+$schema->disconnect;
 
-done_testing();
+done_testing;
