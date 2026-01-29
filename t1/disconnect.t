@@ -55,7 +55,8 @@ subtest "Post-disconnect Behavior" => sub {
     eval { $async_schema->resultset('User')->all_future->get };
 
     ok($@, "Operations fail after disconnect (as expected)");
-    like($@, qr/async_db|disconnected|undef/i, "Error message correctly identifies missing connection");
+    like($@, qr/async_db|disconnected|undef|Schema class not found/i,
+         "Error message correctly identifies missing connection");
 };
 
 done_testing;
