@@ -841,29 +841,30 @@ sub _serialise_row_with_prefetch {
     my ($row, $prefetch) = @_;
     return unless $row;
 
-    # 1. Base columns
+    # 1. If it's a plain HASH (from HashRefInflator),
+    # just return it. DBIC already structured it for us.
+    return $row if ref($row) eq 'HASH';
+
+    # 2. If it's an object, we proceed with manual extraction
     my %data = $row->get_columns;
 
-    # 2. Process Prefetches using the normalized spec
     if ($prefetch) {
         my $spec = _normalise_prefetch($prefetch);
-
         foreach my $rel (keys %$spec) {
-            # Check if the row can actually perform this relationship
-            if ($row->can($rel)) {
-                # This is the "poke": calling the accessor $row->$rel
-                # If prefetched, DBIC returns the data from memory.
+            # Only call methods if we have a blessed object
+            if (blessed($row) && $row->can($rel)) {
                 my $related = eval { $row->$rel };
                 next if $@ || !defined $related;
 
-                if (ref($related) eq 'DBIx::Class::ResultSet' || eval { $related->isa('DBIx::Class::ResultSet') }) {
-                    # has_many: recurse into the collection
-                    my @items = $related->all;
+                if (blessed($related)
+                    && $related->isa('DBIx::Class::ResultSet')) {
                     $data{$rel} = [
-                        map { _serialise_row_with_prefetch($_, $spec->{$rel}) } @items
+                        map {
+                            _serialise_row_with_prefetch($_, $spec->{$rel})
+                        } $related->all
                     ];
-                } elsif (eval { $related->isa('DBIx::Class::Row') }) {
-                    # single: recurse into the row
+                }
+                else {
                     $data{$rel} = _serialise_row_with_prefetch($related, $spec->{$rel});
                 }
             }

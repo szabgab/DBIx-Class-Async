@@ -51,8 +51,16 @@ $async_schema->resultset('Product')->count->get;
 
 # 6. LATE REGISTRATION: Register inflation via the Proxy
 $async_schema->inflate_column('Product', 'metadata', {
-    inflate => sub { $json->decode(shift) },
-    deflate => sub { $json->encode(shift) },
+    inflate => sub {
+        my $val = shift;
+        return $val if ref $val; # <--- ADD THIS: Skip if already inflated (HASH)
+        return $json->decode($val);
+    },
+    deflate => sub {
+        my $val = shift;
+        return $val unless ref $val; # <--- ADD THIS: Skip if already deflated (STRING)
+        return $json->encode($val);
+    },
 });
 
 # 7. EXECUTE TEST: Find and Modify via Async

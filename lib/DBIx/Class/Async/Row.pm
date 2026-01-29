@@ -104,11 +104,18 @@ sub copy {
     return $self->{async_db}->resultset($self->{source_name})->create(\%data);
 }
 
-
 sub create_related {
     my ($self, $rel_name, $col_data) = @_;
 
-    return $self->related_resultset($rel_name)->create($col_data);
+    my $rs = $self->related_resultset($rel_name);
+
+    my $rs_cond = (ref $rs->{cond} eq 'HASH')  ? $rs->{cond}
+                : (ref $rs->{_cond} eq 'HASH') ? $rs->{_cond}
+                : {};
+
+    my $merged_data = { %$rs_cond, %{$col_data || {}} };
+
+    return $rs->create($merged_data);
 }
 
 sub delete {
@@ -410,57 +417,52 @@ sub make_column_dirty {
     return $self;
 }
 
+
 sub related_resultset {
     my ($self, $rel_name, $cond, $attrs) = @_;
 
-    my $bridge       = $self->{_async_db};
-    my $schema_class = $bridge->{_schema_class};
-    my $connect_info = $bridge->{_connect_info};
-    my $temp_schema  = $schema_class->connect(@$connect_info);
+    # 1. Get metadata from the schema class (no temp_schema needed)
+    my $source_obj = $self->{_async_db}->{_schema_class}->source($self->{_source_name});
+    my $rel_info   = $source_obj->relationship_info($rel_name);
+    die "No such relationship '$rel_name' on " . $self->{_source_name} unless $rel_info;
 
-    # Get the source for this row
-    my $source = $temp_schema->source($self->{_source_name});
-
-    # Get the relationship information
-    my $rel_info = $source->relationship_info($rel_name);
-    unless ($rel_info) {
-        die "No such relationship '$rel_name' on " . $self->{_source_name};
-    }
-
-    # Get the foreign source name
-    my $foreign_source = $rel_info->{source};
-
-    # Build the join condition
-    # For a simple belongs_to/has_many, we need to match the foreign key
+    # 2. Build the Join Condition (the foreign keys)
     my $join_cond = {};
-
     if ($rel_info->{cond}) {
-        # Parse the relationship condition
-        # Format is usually { 'foreign.fk' => 'self.pk' }
         while (my ($foreign_col, $self_col) = each %{$rel_info->{cond}}) {
-            # Extract column names (remove 'foreign.' and 'self.' prefixes)
             $foreign_col =~ s/^foreign\.//;
             $self_col =~ s/^self\.//;
-
-            # Get the value from this row
-            my $value = $self->get_column($self_col);
-            $join_cond->{$foreign_col} = $value;
+            $join_cond->{$foreign_col} = $self->get_column($self_col);
         }
     }
 
-    # Merge with any additional conditions passed by the user
-    if ($cond && ref $cond eq 'HASH') {
-        $join_cond = { %$join_cond, %$cond };
+    # 3. Finalize condition and source name
+    my $final_cond = { %$join_cond, %{ $cond || {} } };
+    my $foreign_source_name = $rel_info->{source};
+
+    # 4. Path A: Prefetched Data Cache
+    if (exists $self->{_relationship_data}{$rel_name}) {
+        my $prefetched = $self->{_relationship_data}{$rel_name};
+
+        my $rs = DBIx::Class::Async::ResultSet->new(
+             schema_instance => $self->{_schema_instance},
+             async_db        => $self->{_async_db},
+             source_name     => $foreign_source_name,
+             cond            => $final_cond,    # Crucial for create_related
+             attrs           => $attrs || {},
+        );
+
+        $rs->{_is_prefetched} = 1;
+        $rs->{_entries}       = ref $prefetched eq 'ARRAY' ? $prefetched : [$prefetched];
+        return $rs;
     }
 
-    $temp_schema->storage->disconnect;
-
-    # Return an Async ResultSet for the related source
+    # 5. Path B: Standard Async Database Path
     return DBIx::Class::Async::ResultSet->new(
-         schema_instance => $self->{_schema_instance}, # Pass the LIVE OBJECT
-         async_db        => $self->{_async_db},        # Pass the SHARED DB HANDLE
-         source_name     => $foreign_source,
-         cond            => $join_cond,
+         schema_instance => $self->{_schema_instance},
+         async_db        => $self->{_async_db},
+         source_name     => $foreign_source_name,
+         cond            => $final_cond,
          attrs           => $attrs || {},
     );
 }

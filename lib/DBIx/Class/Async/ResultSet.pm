@@ -231,9 +231,32 @@ sub all_future {
             return [];
         }
 
-        my @objects = map { $self->_inflate_row($_) } @$rows_data;
+        # 1. Apply Column Inflators (JSON -> HASH) to the raw data first
+        my $moniker      = $self->{_source_name};
+        my $source_class = $self->result_source->result_class;
 
-        # Return the arrayref directly to prevent nested Futures
+        my $inflators = $db->{_custom_inflators}{$moniker}
+                     || $db->{_custom_inflators}{$source_class}
+                     || {};
+
+        if (keys %$inflators) {
+            foreach my $row (@$rows_data) {
+                foreach my $col (keys %$inflators) {
+                    if (exists $row->{$col} && defined $row->{$col} && !ref $row->{$col}) {
+                        $row->{$col} = $inflators->{$col}{inflate}->($row->{$col});
+                    }
+                }
+            }
+        }
+
+        # 2. Decide based on result_class
+        my $result_class = $self->{_attrs}{result_class} || '';
+        if ($result_class eq 'DBIx::Class::ResultClass::HashRefInflator') {
+            return $rows_data;
+        }
+
+        # 3. Otherwise, turn into Row objects
+        my @objects = map { $self->_inflate_row($_) } @$rows_data;
         return \@objects;
     });
 }
@@ -298,8 +321,11 @@ sub create {
     }
 
     # 3. Leverage specialised payload builder
-    my $payload = $self->_build_payload(\%deflated_data);
-    $payload->{data} = \%deflated_data;
+    my $payload = {
+        source_name => $self->{_source_name},
+        data        => \%deflated_data,
+        attrs       => $self->{_attrs} || {},
+    };
 
     # 4. Dispatch with correct signature
     return DBIx::Class::Async::_call_worker(

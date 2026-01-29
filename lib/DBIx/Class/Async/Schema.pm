@@ -247,6 +247,13 @@ sub inflate_column {
 
 ############################################################################
 
+sub native_schema {
+    my $self = shift;
+    return $self->{_native_schema};
+}
+
+############################################################################
+
 sub populate {
     my ($self, $source_name, $data) = @_;
 
@@ -335,6 +342,18 @@ sub resultset {
 }
 
 ############################################################################
+
+sub search_with_prefetch {
+    my ($self, $source_name, $cond, $prefetch, $attrs) = @_;
+
+    $attrs ||= {};
+    my %merged_attrs = ( %$attrs, prefetch => $prefetch, collapse => 1 );
+
+    return $self->resultset($source_name)
+                ->search($cond, \%merged_attrs)
+                ->all_future
+                ->then(sub { my ($rows) = @_; return $rows; });
+}
 
 sub set_default_context {
     my $self = shift;
@@ -638,6 +657,30 @@ sub _build_inflator_map {
                 $map->{$source_name}{$col} = {
                     deflate => $info->{deflate},
                     inflate => $info->{inflate},
+                };
+            }
+            # Explicit check for JSON Serializer
+            elsif ($info->{serializer_class} && $info->{serializer_class} eq 'JSON') {
+                require JSON;
+                my $json = JSON->new->utf8->allow_nonref;
+                $map->{$source_name}{$col} = {
+                    inflate => sub {
+                        my $val = shift;
+                        return $val if !defined $val || ref($val); # Skip if NULL or already a HASH
+
+                        my $decoded;
+                        eval { $decoded = $json->decode($val); 1; } or do {
+                            warn "Failed to inflate JSON in $col: $@ (Value: $val)";
+                            return $val; # Return raw string so the app doesn't crash
+                        };
+                        return $decoded;
+                    },
+                    deflate => sub {
+                        my $val = shift;
+                        return $val if !defined $val || !ref($val); # Skip if NULL or already a string
+
+                        return $json->encode($val);
+                    },
                 };
             }
         }
