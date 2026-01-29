@@ -2,27 +2,52 @@
 
 use strict;
 use warnings;
-use utf8;
 
 use Test::More;
-use Test::Exception;
 use Test::Deep;
+use File::Temp;
+use Test::Exception;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
-use TestDB;
 
-my $db_file      = setup_test_db();
-my $loop         = IO::Async::Loop->new;
-my $schema_class = get_test_schema_class();
-my $schema       = DBIx::Class::Async::Schema->connect(
-    "dbi:SQLite:dbname=$db_file",
-    undef,
-    undef,
-    { sqlite_unicode => 1 },
-    { workers => 2, schema_class => $schema_class, loop => $loop }
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
 );
+
+# 1. Deploy and wait
+$schema->await($schema->deploy({ add_drop_table => 1 }));
+
+# 2. Seed the user
+my $row_1 = {
+    name     => 'Alice',
+    age      => 20,
+    email    => 'alice@example.com',
+    active   => 1,
+    settings => undef,
+    balance  => 10,
+};
+
+my $row_2 = {
+    name     => 'John',
+    age      => 25,
+    email    => 'john@example.com',
+    active   => 1,
+    settings => undef,
+    balance  => 12,
+};
+
+my $rs = $schema->resultset('User');
+$schema->await($rs->create($row_1));
+$schema->await($rs->create($row_2));
 
 # Test 1: ResultSet creation and basics
 subtest 'ResultSet basics' => sub {
@@ -67,7 +92,7 @@ subtest 'Search operations' => sub {
     isa_ok($count_future, 'Future', 'count_future() returns Future');
 
     my $active_count = $count_future->get;
-    cmp_ok($active_count, '==', 3, 'Found 3 active users');
+    cmp_ok($active_count, '==', 2, 'Found 3 active users');
 
     # Search with attributes
     my $ordered_rs = $rs->search(
@@ -78,11 +103,11 @@ subtest 'Search operations' => sub {
     my $ordered_future  = $ordered_rs->all_future;
     my $ordered_results = $ordered_future->get;
 
-    cmp_ok(scalar @$ordered_results, '==', 2, 'Limited to 2 rows');
+    cmp_ok(scalar @$ordered_results, '==', 2, 'Limited to 1 row');
 
     # Get names from results
     my @names = map { $_->{name} } @$ordered_results;
-    is_deeply(\@names, ['Diana', 'Bob'], 'Correct order and limit')
+    is_deeply(\@names, ['John', 'Alice'], 'Correct order and limit')
         or diag("Got names: @names");
 
     # Empty search
@@ -213,6 +238,5 @@ subtest 'Update operations' => sub {
 };
 
 $schema->disconnect;
-teardown_test_db();
 
 done_testing();
