@@ -1,12 +1,12 @@
+#!/usr/bin/env perl
+
 use strict;
 use warnings;
 use Test::More;
 use File::Temp qw(tempfile);
 use lib 'lib', 't/lib';
-
-BEGIN {
-    $SIG{__WARN__} = sub {};
-}
+use TestSchema;
+use DBIx::Class::Async::Schema;
 
 # Helper to resolve Futures
 sub wait_for {
@@ -19,18 +19,15 @@ sub wait_for {
 my ($fh, $filename) = tempfile(SUFFIX => '.db', UNLINK => 1);
 my $dsn = "dbi:SQLite:dbname=$filename";
 
-use TestSchema;
 my $native_schema = TestSchema->connect($dsn);
 $native_schema->deploy();
 
-use DBIx::Class::Async::Schema;
-my $async_schema = DBIx::Class::Async::Schema->connect(
+my $schema = DBIx::Class::Async::Schema->connect(
     $dsn, { schema_class => 'TestSchema', workers => 1 }
 );
 
-## Subtest: Pointer Reset Logic
 subtest 'ResultSet pointer reset' => sub {
-    my $rs = $async_schema->resultset('User');
+    my $rs = $schema->resultset('User');
 
     # 1. Manually seed cache with 3 items
     $rs->set_cache([
@@ -40,7 +37,7 @@ subtest 'ResultSet pointer reset' => sub {
     ]);
 
     # 2. Inflate the rows by calling all()
-    my $results = wait_for($rs->all);
+    my $results = $schema->await($rs->all);
     is(scalar @$results, 3, "Inflated 3 rows");
 
     # 3. Simulate iterating through the results
@@ -61,4 +58,4 @@ subtest 'ResultSet pointer reset' => sub {
     is($first_again->name, 'Alice', "Data is still available and correct after reset");
 };
 
-done_testing();
+done_testing;

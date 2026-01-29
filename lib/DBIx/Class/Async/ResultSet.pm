@@ -122,32 +122,91 @@ sub new_result_set {
 
 ############################################################################
 
+sub is_cache_found {
+    my ($self, $key) = @_;
+
+    my $db     = $self->{_async_db};
+    my $source = $self->{_source_name};
+
+    # Return only if both the source bucket and the specific key exist
+    return $db->{_query_cache}->{$source}->{$key}
+        if exists $db->{_query_cache}->{$source}
+        && exists $db->{_query_cache}->{$source}->{$key};
+
+    return undef;
+}
+
+sub clear_cache {
+    my ($self) = @_;
+    my $source = $self->{_source_name};
+
+    # Kill the local ghost
+    $self->{_rows} = undef;
+
+    # Kill the central surgical bucket
+    if ($self->{_async_db}) {
+        delete $self->{_async_db}->{_query_cache}->{$source};
+    }
+}
+
 sub all {
     my ($self) = @_;
+    my $db     = $self->{_async_db};
+    my $source = $self->{_source_name};
 
-    # 1. Return cached objects if we already have them
-    if ($self->{_rows} && ref($self->{_rows}) eq 'ARRAY') {
-        return Future->done($self->{_rows});
-    }
-
-    # 2. Handle Prefetched/Manual entries
+    # 1. Check for prefetched entries
     if ($self->{_is_prefetched} && $self->{_entries}) {
+        my $class = $self->result_source->result_class;
         $self->{_rows} = [
             map {
-                (blessed($_) && $_->isa('DBIx::Class::Row'))
-                ? $_
-                : $self->_inflate_row($_)
+                # 1. If it's already an object, just keep it!
+                if (ref($_) && ref($_) ne 'HASH') {
+                    $_;
+                }
+                else {
+                    # 2. If it's a hash, inflate it manually
+                    my $row = $class->new($_);
+                    $row->{_async_db}      = $db;
+                    $row->{_result_source} = $self->result_source;
+                    $row->{_source_name}   = $source;
+                    $row->{_in_storage}    = 1;
+                    $row;
+                }
             } @{$self->{_entries}}
         ];
+
+        $self->{_is_prefetched} = 0;
         return Future->done($self->{_rows});
     }
 
-    # 3. Standard Async Fetch
+    # 2. Fallback: If we already have inflated _rows, use them
+    if ($self->{_rows}
+        && ref($self->{_rows}) eq 'ARRAY'
+        && @{$self->{_rows}}) {
+        return Future->done($self->{_rows});
+    }
+
+    # 3. Check Surgical Schema Cache
+    my $cache_key = $self->_generate_cache_key;
+    if (my $cached = $self->is_cache_found($cache_key)) {
+        $db->{_stats}->{_cache_hits}++;
+        $self->{_rows} = $cached;
+        return Future->done($cached);
+    }
+
+    # 4. Standard Async Fetch (The Miss)
     return $self->all_future->then(sub {
         my ($rows) = @_;
+
+        $db->{_stats}->{_cache_misses}++;
         $self->{_rows} = $rows;
-        $self->{_pos}  = 0;
-        return Future->done($rows);
+
+        # Save to surgical bucket
+        if ($db->{_query_cache}) {
+            $db->{_query_cache}->{$source}->{$cache_key} = $rows;
+        }
+
+        return $rows;
     });
 }
 
@@ -169,13 +228,13 @@ sub all_future {
         my $rows_data = shift;
 
         if (!ref($rows_data) || ref($rows_data) ne 'ARRAY') {
-            return Future->done([]);
+            return [];
         }
 
-        # Use the helper to ensure nested relations are inflated
         my @objects = map { $self->_inflate_row($_) } @$rows_data;
 
-        return Future->done(\@objects);
+        # Return the arrayref directly to prevent nested Futures
+        return \@objects;
     });
 }
 
@@ -220,6 +279,8 @@ sub create {
     my ($self, $raw_data) = @_;
     my $db          = $self->{_async_db};
     my $source_name = $self->{_source_name};
+
+    $self->clear_cache;
 
     # 1. Fetch inflators
     my $inflators = $db->{_custom_inflators}{$source_name} || {};
@@ -332,6 +393,8 @@ sub count_total {
 
 sub delete {
     my $self = shift;
+
+    $self->clear_cache;
 
     # If we have complex attributes (LIMIT, OFFSET, JOINs),
     # we MUST use the safe path.
@@ -1025,6 +1088,8 @@ sub update {
     my $self = shift;
     my ($cond, $updates);
 
+    $self->clear_cache;
+
     # Logic to handle both:
     #   ->update({ col => val })
     #   ->update({ id => 1 }, { col => val })
@@ -1153,6 +1218,18 @@ sub update_or_create {
 }
 
 ############################################################################
+
+sub _generate_cache_key {
+    my ($self) = @_;
+
+    # We combine the source name, conditions, and attributes
+    # Sortkeys is vital so {a=>1, b=>2} is the same as {b=>2, a=>1}
+    return join('|',
+        $self->{_source_name},
+        Data::Dumper->new([ $self->{_cond}  // {} ])->Sortkeys(1)->Indent(0)->Dump,
+        Data::Dumper->new([ $self->{_attrs} // {} ])->Sortkeys(1)->Indent(0)->Dump,
+    );
+}
 
 sub _build_payload {
     my ($self, $cond, $attrs, $is_count_op) = @_;

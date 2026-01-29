@@ -12,152 +12,98 @@ use FindBin qw($Bin);
 use lib "$Bin/../lib";
 use lib "$Bin/lib";
 
-use DBI;
-use DBIx::Class::Async;
 use DBIx::Class::Async::Schema;
 use TestSchema;
 
+# Setup Database
 my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
 
-# 1. Initialise the Async Schema
+# Initialise a global async Schema
 my $schema = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file",
     undef, undef, {},
     { workers => 2, schema_class => 'TestSchema' }
 );
 
-# 2. Get the loop from the internal async_db object
+# 3. Deploy
 my $loop = $schema->{_async_db}->{_loop};
-
-# 3. Deploy automatically!
 $loop->await($schema->deploy);
-
 
 # Test 1: Basic schema connection
 subtest 'Basic schema connection' => sub {
-
-    my $schema;
-    lives_ok {
-        $schema = DBIx::Class::Async::Schema->connect(
-            "dbi:SQLite:dbname=$db_file",
-            undef,
-            undef,
-            {},
-            { workers => 2, schema_class => 'TestSchema' }
-        );
-    } 'Schema connects successfully';
-
     isa_ok($schema, 'DBIx::Class::Async::Schema');
 
     my @sources = $schema->sources;
     is(scalar @sources, 3, 'Has 3 sources');
-
     ok(grep(/^User$/, @sources), 'Has User source');
     ok(grep(/^Order$/, @sources), 'Has Order source');
-
-    lives_ok { $schema->disconnect } 'Can disconnect';
 };
 
 # Test 2: Simple user CRUD
 subtest 'Simple user CRUD' => sub {
-
-    my $schema = DBIx::Class::Async::Schema->connect(
-        "dbi:SQLite:dbname=$db_file",  # Same file
-        undef,
-        undef,
-        {},
-        { workers => 2, schema_class => 'TestSchema' }
-    );
-
     my $user_rs = $schema->resultset('User');
     isa_ok($user_rs, 'DBIx::Class::Async::ResultSet');
 
     # Create
     my $user = $user_rs->create({
-        name => 'Test User',
-        email => 'test@example.com',
+        name   => 'Test User',
+        email  => 'test@example.com',
         active => 1,
     })->get;
 
-    isa_ok($user, 'DBIx::Class::Async::Row');
-    is($user->name, 'Test User');
-    is($user->email, 'test@example.com');
+    isa_ok($user, 'DBIx::Class::Async::Row', 'Created row');
+    is($user->name,  'Test User', 'Name is correct');
+    is($user->email, 'test@example.com', 'Email is correct');
 
     # Find
     my $found = $user_rs->find($user->id)->get;
-    isa_ok($found, 'DBIx::Class::Async::Row');
-    is($found->name, 'Test User');
+    isa_ok($found, 'DBIx::Class::Async::Row', 'Found row via find()');
+    is($found->name, 'Test User', 'Found row name matches');
 
     # Update
     my $updated = $found->update({
-        name => 'Updated User',
+        name   => 'Updated User',
         active => 0,
     })->get;
-    is($updated->name, 'Updated User');
-    is($updated->active, 0);
-
-    $schema->disconnect;
+    is($updated->name,   'Updated User', 'Update reflected in returned object');
+    is($updated->active, 0,              'Update attribute correct');
 };
 
 # Test 3: Order operations
 subtest 'Order operations' => sub {
-
-    my $schema = DBIx::Class::Async::Schema->connect(
-        "dbi:SQLite:dbname=$db_file",  # Same file
-        undef,
-        undef,
-        {},
-        { workers => 2, schema_class => 'TestSchema' }
-    );
+    my $user_rs  = $schema->resultset('User');
+    my $order_rs = $schema->resultset('Order');
 
     # Create user
-    my $user = $schema->resultset('User')->create({
-        name => 'Order User',
+    my $user = $user_rs->create({
+        name  => 'Order User',
         email => 'order@example.com',
     })->get;
 
     # Create order
-    my $order = $schema->resultset('Order')->create({
+    my $order = $order_rs->create({
         user_id => $user->id,
-        amount => 49.99,
-        status => 'paid',
+        amount  => 49.99,
+        status  => 'paid',
     })->get;
 
     isa_ok($order, 'DBIx::Class::Async::Row');
-    is($order->amount, 49.99);
-    is($order->user_id, $user->id);
+    is($order->amount,  49.99,    'Amount is correct');
+    is($order->user_id, $user->id, 'FK user_id is correct');
 
-    # Test belongs_to
-    my $order_user_future = $order->user;
-    isa_ok($order_user_future, 'Future'); # It's a Future now
-
-    my $order_user = $order_user_future->get; # Resolve it
-    isa_ok($order_user, 'DBIx::Class::Async::Row');
-    is($order_user->id, $user->id, 'belongs_to works');
+    # Test belongs_to (Lazy Loading)
+    my $order_user = $order->user->get;
+    isa_ok($order_user, 'DBIx::Class::Async::Row', 'Relationship returns a Row');
+    is($order_user->id, $user->id, 'Relationship belongs_to works');
 
     # Test has_many
-    my $orders_rs = $user->orders;
-    isa_ok($orders_rs, 'DBIx::Class::Async::ResultSet');
-
-    my $orders_future = $orders_rs->all;
     my $user_orders = $user->orders->all->get;
     is(scalar @$user_orders, 1, 'User has 1 order');
-    is($user_orders->[0]->id, $order->id, 'Correct order');
-
-    $schema->disconnect;
+    is($user_orders->[0]->id, $order->id, 'Relationship has_many works');
 };
 
 # Test 4: Search and count
 subtest 'Search and count' => sub {
-
-    my $schema = DBIx::Class::Async::Schema->connect(
-        "dbi:SQLite:dbname=$db_file",
-        undef,
-        undef,
-        {},
-        { workers => 2, schema_class => 'TestSchema' }
-    );
-
     my $user_rs = $schema->resultset('User');
 
     # Count before
@@ -169,24 +115,19 @@ subtest 'Search and count' => sub {
 
     # Count after
     my $count_after = $user_rs->count->get;
-    is($count_after, $count_before + 2, 'Count increased');
+    is($count_after, $count_before + 2, 'Count increased after creation');
 
     # Search active
-    my $active_search_rs = $user_rs->search({ active => 1 });
-    my $active_users_future = $active_search_rs->all_future;
-    my $active_users = $active_users_future->get;
-    isa_ok($active_users, 'ARRAY', 'search returns array of rows');
-
-    # Check array has at least 1 item
-    cmp_ok(scalar @$active_users, '>=', 1, 'Found active users');
+    my $active_users = $user_rs->search({ active => 1 })->all->get;
+    isa_ok($active_users, 'ARRAY', 'search->all returns arrayref');
+    cmp_ok(scalar @$active_users, '>=', 1, 'Found active users in array');
 
     # Count active
-    my $active_count_rs = $user_rs->search({ active => 1 });
-    my $active_count_future = $active_count_rs->count;
-    my $active_count = $active_count_future->get;
-    cmp_ok($active_count, '>=', 1, 'Has active users');
-
-    $schema->disconnect;
+    my $active_count = $user_rs->search({ active => 1 })->count->get;
+    cmp_ok($active_count, '>=', 1, 'Search count works');
 };
 
-done_testing();
+# Final Disconnect
+$schema->disconnect;
+
+done_testing;

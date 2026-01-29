@@ -119,7 +119,6 @@ subtest 'Testing find_or_create' => sub {
     is($rs->stats('queries'), $initial_queries + 2, "Dispatched 2 queries (1 find + 1 create)");
 
     # 2. Attempt to find_or_create again (should find)
-    note "Second call: Should FIND existing";
     my $f2 = $rs->find_or_create({ name => $unique_name });
 
     my $user2;

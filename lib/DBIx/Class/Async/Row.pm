@@ -129,6 +129,10 @@ sub delete {
         $cond{$col} = $val;
     }
 
+    if (my $db = $self->{_async_db}) {
+        delete $db->{_query_cache}->{$self->{_source_name}};
+    }
+
     # 2. Use the Bridge (Ensure you use the key names the Worker expects)
     return DBIx::Class::Async::delete(
         $self->{_async_db},

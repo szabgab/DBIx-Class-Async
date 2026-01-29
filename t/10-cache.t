@@ -2,70 +2,71 @@
 
 use strict;
 use warnings;
-use FindBin;
-use File::Spec;
-use File::Copy;
-use File::Temp;
+
 use Test::More;
+use Test::Deep;
+use File::Temp;
 use Test::Exception;
+use IO::Async::Loop;
+use DBIx::Class::Async::Schema;
 
-use lib "$FindBin::Bin/lib";
-use DBIx::Class::Async;
+use lib 't/lib';
 
-my $source_db = File::Spec->catfile($FindBin::Bin, 'test.db');
-
-unless (-e $source_db) {
-    plan skip_all => "Source test database not found: $source_db";
-}
-
-my $temp_db = File::Temp->new(
-    TEMPLATE => 'test_XXXXXX',
-    SUFFIX   => '.db',
-    UNLINK   => 1,
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
 );
 
-my $temp_db_path = $temp_db->filename;
+# 1. Deploy and wait
+$schema->await($schema->deploy({ add_drop_table => 1 }));
 
-copy($source_db, $temp_db_path) or
-    plan skip_all => "Failed to copy database: $!";
+# 2. Seed the user
+my $row = {
+    name     => 'Alice',
+    age      => 20,
+    email    => 'alice@example.com',
+    active   => 1,
+    settings => undef,
+    balance  => 10,
+};
 
-my $db_file = $temp_db_path;
-
-my $async_db = DBIx::Class::Async->new(
-    schema_class => 'TestSchema',
-    connect_info => ["dbi:SQLite:$db_file", '', '', {
-        sqlite_use_immediate_transaction => 0,
-    }],
-    workers   => 2,
-    cache_ttl => 60,
-);
+my $rs = $schema->resultset('User');
+$schema->await($rs->create($row));
 
 # First query (should miss cache)
-my $results1 = $async_db->search('User', { active => 1 })->get;
+my $results1 = $rs->search({ active => 1 })->all->get;
 
 # Second identical query (should hit cache)
-my $results2 = $async_db->search('User', { active => 1 })->get;
+my $results2 = $rs->search({ active => 1 })->all->get;
 
 is(scalar @$results2, scalar @$results1, 'cached results have same count');
 
-my $stats = $async_db->stats;
-cmp_ok($stats->{cache_hits}, '>=', 1, 'cache hits recorded');
-cmp_ok($stats->{cache_misses}, '>=', 1, 'cache misses recorded');
+cmp_ok($schema->cache_hits,   '>=', 1, 'cache hits recorded');
+cmp_ok($schema->cache_misses, '>=', 1, 'cache misses recorded');
 
-# Test with cache disabled
-my $async_db_no_cache = DBIx::Class::Async->new(
-    schema_class => 'TestSchema',
-    connect_info => ["dbi:SQLite:$db_file", '', '', {
-        sqlite_use_immediate_transaction => 0,
-    }],
-    workers   => 2,
-    cache_ttl => 0,
+# 3. Test with cache disabled
+my $schema_no_cache = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 0,
+    },
 );
 
-my $results3 = $async_db_no_cache->search('User')->get;
-ok(scalar @$results3, 'search works with cache disabled');
+my $results3 = $schema_no_cache->resultset('User')
+                               ->search({ active => 1 })
+                               ->all;
+my $rows = $schema_no_cache->await($results3);
+ok(scalar @$rows, 'search works with cache disabled');
 
-$async_db->disconnect;
-$async_db_no_cache->disconnect;
+$schema->disconnect;
+$schema_no_cache->disconnect;
 
 done_testing;

@@ -102,6 +102,17 @@ sub connect {
     return $self;
 }
 
+# Cache specific
+sub cache_hits    { shift->{_async_db}->{_stats}->{_cache_hits}   // 0 }
+sub cache_misses  { shift->{_async_db}->{_stats}->{_cache_misses} // 0 }
+sub cache_retries { shift->{_async_db}->{_stats}->{_retries}      // 0 }
+
+# Execution specific
+sub total_queries { shift->{_async_db}->{_stats}->{_queries}      // 0 }
+sub error_count   { shift->{_async_db}->{_stats}->{_errors}       // 0 }
+sub deadlock_count{ shift->{_async_db}->{_stats}->{_deadlocks}    // 0 }
+
+
 sub class {
     my ($self, $source_name) = @_;
 
