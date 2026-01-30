@@ -368,6 +368,10 @@ sub create {
 sub count {
     my ($self, $cond, $attrs) = @_;
 
+    if (!defined $cond && exists $self->{_attrs}{rows}) {
+        return Future->done($self->{_attrs}{rows});
+    }
+
     my $db = $self->{_async_db};
 
     my $cache_key = $self->_generate_cache_key(1);
@@ -605,6 +609,11 @@ sub find_or_create {
 }
 
 ############################################################################
+
+sub get_attribute {
+    my ($self, $key) = @_;
+    return $self->{_attrs}->{$key};
+}
 
 sub get {
     my $self = shift;
@@ -845,6 +854,10 @@ sub result_class {
 sub related_resultset {
     my ($self, $rel_name) = @_;
 
+    unless (defined $rel_name && length $rel_name) {
+        croak "relationship_name is required for related_resultset";
+    }
+
     # 1. Get current source and schema link
     my $source        = $self->result_source;
     my $schema_inst   = $self->{_schema_instance};
@@ -1074,14 +1087,13 @@ sub schema {
 
 sub slice {
     my ($self, $first, $last) = @_;
-    require Carp;
 
     # 1. Validation logic (remains the same)
-    Carp::croak("slice requires two arguments (first and last index)")
+    croak("slice requires two arguments (first and last index)")
         unless defined $first && defined $last;
-    Carp::croak("slice indices must be non-negative integers")
+    croak("slice indices must be non-negative integers")
         if $first < 0 || $last < 0;
-    Carp::croak("first index must be less than or equal to last index")
+    croak("first index must be less than or equal to last index")
         if $first > $last;
 
     # 2. Calculate pagination parameters
