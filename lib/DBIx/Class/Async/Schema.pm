@@ -130,41 +130,44 @@ sub class {
 }
 
 sub clone {
-    my $self = shift;
-    my %args = @_;
+    my ($self, %args) = @_;
 
-    # 1. Determine worker count for the new pool
+    # 1. Determine worker count
+    my $orig_db = $self->{_async_db};
     my $worker_count = $args{workers}
-        || $self->{_async_db}->{_workers_config}->{_count}
+        || ($orig_db && $orig_db->{_workers_config} && $orig_db->{_workers_config}{_count})
         || 2;
 
     # 2. Re-create the async engine
-    my $new_async_db = DBIx::Class::Async->create_async_db(
-        schema_class   => $self->schema_class,
-        connect_info   => $self->{_async_db}->{_connect_info},
-        workers        => $worker_count,
-        loop           => $self->{_async_db}->{_loop},
-        # Pass through other configs like metrics/retry if they exist
-        enable_metrics => $self->{_async_db}->{_enable_metrics},
-        enable_retry   => $self->{_async_db}->{_enable_retry},
-    );
+    my $new_async_db;
+    if ($orig_db) {
+        $new_async_db = DBIx::Class::Async->create_async_db(
+            schema_class   => $orig_db->{_schema_class},
+            connect_info   => $orig_db->{_connect_info},
+            workers        => $worker_count,
+            loop           => $orig_db->{_loop},
+            enable_metrics => $orig_db->{_enable_metrics},
+            enable_retry   => $orig_db->{_enable_retry},
+        );
+    }
 
-    # 3. Build the new schema object
+    # 3. Build the new schema object (strictly internal keys)
     my $new_self = bless {
         %$self,
         _async_db      => $new_async_db,
         _sources_cache => {},
     }, ref $self;
 
-    # 4. Re-attach a fresh storage wrapper
-    $new_self->{_storage} = DBIx::Class::Async::Storage::DBI->new(
-        schema   => $new_self,
-        async_db => $new_async_db,
-    );
+    # 4. Re-attach storage
+    if ($new_async_db) {
+        $new_self->{_storage} = DBIx::Class::Async::Storage::DBI->new(
+            schema   => $new_self,
+            async_db => $new_async_db,
+        );
+    }
 
     return $new_self;
 }
-
 
 ############################################################################
 
