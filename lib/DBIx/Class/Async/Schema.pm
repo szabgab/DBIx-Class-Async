@@ -292,6 +292,7 @@ sub populate {
     croak("source_name required")     unless defined $source_name;
     croak("data required")            unless defined $data;
     croak("data must be an arrayref") unless ref $data eq 'ARRAY';
+    croak("data cannot be empty")     unless scalar @$data;
 
     # 2. Delegate to ResultSet
     # This creates the RS and immediately triggers the bulk insert logic

@@ -761,7 +761,7 @@ sub _do_populate {
 
     croak("data required") unless defined $data;
     croak("data must be an arrayref") unless ref $data eq 'ARRAY';
-    return Future->done([]) unless @$data;
+    croak("data cannot be empty") unless @$data;
 
     # 1. Build payload and STRICTLY validate
     my $payload = $self->_build_payload();
@@ -785,19 +785,44 @@ sub _do_populate {
         # This is the header-style populate: [['col1', 'col2'], [val1, val2]]
         # We pass it through raw, as the Worker should handle the mapping,
         # but we still want to keep our deflation logic if possible.
+        my @rows = @$data; # Copy to avoid mutating original if needed
+        my $header = shift @rows;
+        my $expected_count = scalar @$header;
+
+        foreach my $row (@rows) {
+            if (scalar @$row != $expected_count) {
+                croak("Row has a different number of columns than the header");
+            }
+        }
         @deflated_data = @$data;
     }
     else {
         # This is the "Array of Hashes" format
-        foreach my $row_data (@$data) {
-            croak("populate row must be a HASH ref") unless ref $row_data eq 'HASH';
+        # 1. Properly declare $source and %col_info
+        my $source   = $self->result_source;
+        my %col_info = %{ $source->columns_info };
 
+        foreach my $row_data (@$data) {
+            croak("populate row must be a HASH ref")
+                unless ref $row_data eq 'HASH';
+
+            # 2. Merge Default Values
+            my %merged_row = %$row_data;
+            while (my ($col, $info) = each %col_info) {
+                if (!exists $merged_row{$col}
+                    && exists $info->{default_value}) {
+                    $merged_row{$col} = $info->{default_value};
+                }
+            }
+
+            # 3. Deflate for Worker
             my %deflated_row;
-            while (my ($k, $v) = each %$row_data) {
+            while (my ($k, $v) = each %merged_row) {
                 my $clean_key = $k;
                 $clean_key =~ s/^(?:foreign|self|me)\.//;
 
-                if ($inflators->{$clean_key} && $inflators->{$clean_key}{deflate}) {
+                if ($inflators->{$clean_key}
+                    && $inflators->{$clean_key}{deflate}) {
                     $v = $inflators->{$clean_key}{deflate}->($v);
                 }
                 $deflated_row{$clean_key} = $v;
