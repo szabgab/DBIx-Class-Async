@@ -14,6 +14,12 @@ use Scalar::Util qw(blessed);
 # Protects internal attributes from being treated as database columns
 my $INTERNAL_KEYS = qr/^(?:_.*|async_db|source_name|schema|_inflation_map)$/;
 
+sub _mark_clean {
+    my $self = shift;
+    $self->{_dirty} = {};
+    return $self;
+}
+
 sub new {
     my ($class, %args) = @_;
 
