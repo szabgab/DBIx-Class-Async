@@ -1,5 +1,8 @@
 package DBIx::Class::Async;
 
+$DBIx::Class::Async::VERSION   = '0.46';
+$DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
+
 use strict;
 use warnings;
 use utf8;
@@ -29,117 +32,6 @@ use constant {
     HEALTH_CHECK_INTERVAL => 300,
 };
 
-
-sub _next_worker {
-    my ($db) = @_;
-
-    return unless $db->{_workers} && @{$db->{_workers}};
-
-    $db->{_worker_idx} //= 0;
-
-    die "No workers available" unless $db->{_workers} && @{$db->{_workers}};
-
-    my $idx    = $db->{_worker_idx};
-    my $worker = $db->{_workers}[$idx];
-
-    $db->{_worker_idx} = ($idx + 1) % @{$db->{_workers}};
-
-    return $worker->{instance};
-}
-
-sub _call_worker {
-    my ($db, $operation, @args) = @_;
-
-    warn "[PID $$] Bridge - sending '$operation' to worker." if ASYNC_TRACE;
-
-    my $worker = _next_worker($db);
-
-    my $future = $worker->call(
-        args => [
-            $db->{_schema_class},
-            $db->{_connect_info},
-            $db->{_workers_config},
-            $operation,
-            @args,
-        ],
-    );
-
-    # Use followed_by which handles both nested and non-nested Futures
-    return $future->followed_by(sub {
-        my ($f) = @_;
-
-        # Handle failure
-        if ($f->is_failed) {
-            $db->{_stats}->{_errors}++;
-            return Future->fail($f->failure);
-        }
-
-        # Get the result
-        my $result = ($f->get)[0];
-
-        # If result is itself a Future, flatten it
-        if (Scalar::Util::blessed($result) && $result->isa('Future')) {
-            return $result->followed_by(sub {
-                my ($inner_f) = @_;
-
-                if ($inner_f->is_failed) {
-                    $db->{_stats}->{_errors}++;
-                    return Future->fail($inner_f->failure);
-                }
-
-                my $inner_result = ($inner_f->get)[0];
-
-                # Check for worker errors
-                if (ref($inner_result) eq 'HASH' && exists $inner_result->{error}) {
-                    $db->{_stats}->{_errors}++;
-                    return Future->fail($inner_result->{error});
-                }
-
-                $db->{_stats}->{_queries}++
-                    unless $operation =~ /^(?:ping|health_check|deploy)$/;
-                return Future->done($inner_result);
-            });
-        }
-
-        # Not a nested Future - handle normally
-        # Check for worker errors
-        if (ref($result) eq 'HASH' && exists $result->{error}) {
-            $db->{_stats}->{_errors}++;
-            return Future->fail($result->{error});
-        }
-
-        $db->{_stats}->{_queries}++
-            unless $operation =~ /^(?:ping|health_check|deploy)$/;
-        return Future->done($result);
-    });
-}
-
-sub disconnect_async_db {
-    my ($async_db) = @_;
-
-    return unless $async_db && ref $async_db eq 'HASH';
-
-    # 1. Clear the health check timer
-    if ($async_db->{_health_check_timer}) {
-        $async_db->{_loop}->remove($async_db->{_health_check_timer});
-        delete $async_db->{_health_check_timer};
-    }
-
-    # 2. Shutdown workers
-    if ($async_db->{_workers}) {
-        foreach my $worker_info (@{ $async_db->{_workers} }) {
-            if (my $instance = $worker_info->{instance}) {
-                $async_db->{_loop}->remove($instance);
-            }
-        }
-        $async_db->{_workers} = [];
-    }
-
-    # 3. Final state update
-    $async_db->{_is_connected} = 0;
-
-    return 1;
-}
 
 sub create_async_db {
     my ($class, %args) = @_;
@@ -223,104 +115,98 @@ sub create_async_db {
     return $async_db;
 }
 
-sub _init_metrics {
-    my $async_db = shift;
+sub disconnect_async_db {
+    my ($async_db) = @_;
 
-    # Try to load Metrics::Any
-    eval {
-        require Metrics::Any;
-        Metrics::Any->import('$METRICS');
+    return unless $async_db && ref $async_db eq 'HASH';
 
-        # Initialise metrics
-        $METRICS->make_counter('db_async_queries_total');
-        $METRICS->make_counter('db_async_cache_hits_total');
-        $METRICS->make_counter('db_async_cache_misses_total');
-        $METRICS->make_histogram('db_async_query_duration_seconds');
-        $METRICS->make_gauge('db_async_workers_active');
-
-    };
-
-    # Silently ignore if Metrics::Any is not available
-    if ($@) {
-        $async_db->{_enable_metrics} = 0;
-        undef $METRICS;
+    # 1. Clear the health check timer
+    if ($async_db->{_health_check_timer}) {
+        $async_db->{_loop}->remove($async_db->{_health_check_timer});
+        delete $async_db->{_health_check_timer};
     }
+
+    # 2. Shutdown workers
+    if ($async_db->{_workers}) {
+        foreach my $worker_info (@{ $async_db->{_workers} }) {
+            if (my $instance = $worker_info->{instance}) {
+                $async_db->{_loop}->remove($instance);
+            }
+        }
+        $async_db->{_workers} = [];
+    }
+
+    # 3. Final state update
+    $async_db->{_is_connected} = 0;
+
+    return 1;
 }
 
-sub _start_health_checks {
-    my ($async_db, $interval) = @_;
+sub _call_worker {
+    my ($db, $operation, @args) = @_;
 
-    return if $interval <= 0;
+    warn "[PID $$] Bridge - sending '$operation' to worker." if ASYNC_TRACE;
 
-    # Try to create the timer
-    eval {
-        require IO::Async::Timer::Periodic;
+    my $worker = _next_worker($db);
 
-        my $timer = IO::Async::Timer::Periodic->new(
-            interval => $interval,
-            on_tick  => sub {
-                # Don't use async here - just fire and forget
-                _health_check($async_db)->retain;
-            },
-        );
+    my $future = $worker->call(
+        args => [
+            $db->{_schema_class},
+            $db->{_connect_info},
+            $db->{_workers_config},
+            $operation,
+            @args,
+        ],
+    );
 
-        $async_db->{_loop}->add($timer);
-        $timer->start;
+    # Use followed_by which handles both nested and non-nested Futures
+    return $future->followed_by(sub {
+        my ($f) = @_;
 
-        $async_db->{_health_check_timer} = $timer;
-    };
+        # Handle failure
+        if ($f->is_failed) {
+            $db->{_stats}->{_errors}++;
+            return Future->fail($f->failure);
+        }
 
-    if ($@) {
-        # If repeat fails, try a different approach or disable health checks
-        warn "Failed to start health checks: $@" if ASYNC_TRACE;
-    }
-}
+        # Get the result
+        my $result = ($f->get)[0];
 
-sub _health_check {
-    my $async_db = shift;
+        # If result is itself a Future, flatten it
+        if (Scalar::Util::blessed($result) && $result->isa('Future')) {
+            return $result->followed_by(sub {
+                my ($inner_f) = @_;
 
-    my @checks = map {
-        my $worker_info = $_;
-        my $worker = $worker_info->{instance};
-        $worker->call(
-            args => [
-                $async_db->{_schema_class},
-                $async_db->{_connect_info},
-                $async_db->{_workers_config},
-                'health_check',
-            ],
-            timeout => 5,
-        )->then(sub {
-            $worker_info->{healthy} = 1;
-            return Future->done(1);
-        }, sub {
-            $worker_info->{healthy} = 0;
-            return Future->done(0);
-        })
-    } @{$async_db->{_workers}};
+                if ($inner_f->is_failed) {
+                    $db->{_stats}->{_errors}++;
+                    return Future->fail($inner_f->failure);
+                }
 
-    return Future->wait_all(@checks)->then(sub {
-        my @results = @_;
-        my $healthy_count = grep { $_->get } @results;
+                my $inner_result = ($inner_f->get)[0];
 
-        _record_metric($async_db, 'set', 'db_async_workers_active', $healthy_count);
+                # Check for worker errors
+                if (ref($inner_result) eq 'HASH' && exists $inner_result->{error}) {
+                    $db->{_stats}->{_errors}++;
+                    return Future->fail($inner_result->{error});
+                }
 
-        return Future->done($healthy_count);
+                $db->{_stats}->{_queries}++
+                    unless $operation =~ /^(?:ping|health_check|deploy)$/;
+                return Future->done($inner_result);
+            });
+        }
+
+        # Not a nested Future - handle normally
+        # Check for worker errors
+        if (ref($result) eq 'HASH' && exists $result->{error}) {
+            $db->{_stats}->{_errors}++;
+            return Future->fail($result->{error});
+        }
+
+        $db->{_stats}->{_queries}++
+            unless $operation =~ /^(?:ping|health_check|deploy)$/;
+        return Future->done($result);
     });
-}
-
-sub _record_metric {
-    my ($async_db, $type, $name, @args) = @_;
-
-    return unless $async_db->{_enable_metrics} && defined $METRICS;
-
-    if ($type eq 'inc') {
-        $METRICS->inc($name, @args);
-    } elsif ($type eq 'observe') {
-        $METRICS->observe($name, @args);
-    } elsif ($type eq 'set') {
-        $METRICS->set($name, @args);
-    }
 }
 
 sub _init_workers {
@@ -357,12 +243,14 @@ sub _init_workers {
                         }
                         return \%cols;
                     }
+
                     if ( eval { $data->isa('DBIx::Class::ResultSet') } ) {
                         return [ map { $deflator->($_) } $data->all ];
                     }
                     if ( ref($data) eq 'ARRAY' ) {
                         return [ map { $deflator->($_) } @$data ];
                     }
+
                     return $data;
                 };
 
@@ -458,7 +346,8 @@ sub _init_workers {
                         if ($@) {
                             warn "[PID $$] WORKER ERROR: $@" if ASYNC_TRACE;
                             return { error => $@ };
-                        } else {
+                        }
+                        else {
                             # IMPORTANT: Force to scalar to avoid HASH(0x...) in Parent
                             # This stringifies potential Math::BigInt objects or references
                             warn "[PID $$] $operation complete: $val"
@@ -488,7 +377,8 @@ sub _init_workers {
 
                         if (!$updates || !keys %$updates) {
                             return 0;
-                        } else {
+                        }
+                        else {
                             return $schema->resultset($source_name)
                                           ->search($cond)
                                           ->update($updates);
@@ -557,7 +447,8 @@ sub _init_workers {
 
                         if ($row) {
                             return _serialise_row_with_prefetch($row, undef, $attrs);
-                        } else {
+                        }
+                        else {
                             return;
                         }
                     }
@@ -727,6 +618,129 @@ sub _init_workers {
     }
 }
 
+#
+#
+# PRIVATE METHODS
+
+sub _init_metrics {
+    my $async_db = shift;
+
+    # Try to load Metrics::Any
+    eval {
+        require Metrics::Any;
+        Metrics::Any->import('$METRICS');
+
+        # Initialise metrics
+        $METRICS->make_counter('db_async_queries_total');
+        $METRICS->make_counter('db_async_cache_hits_total');
+        $METRICS->make_counter('db_async_cache_misses_total');
+        $METRICS->make_histogram('db_async_query_duration_seconds');
+        $METRICS->make_gauge('db_async_workers_active');
+
+    };
+
+    # Silently ignore if Metrics::Any is not available
+    if ($@) {
+        $async_db->{_enable_metrics} = 0;
+        undef $METRICS;
+    }
+}
+
+sub _next_worker {
+    my ($db) = @_;
+
+    return unless $db->{_workers} && @{$db->{_workers}};
+
+    $db->{_worker_idx} //= 0;
+
+    die "No workers available" unless $db->{_workers} && @{$db->{_workers}};
+
+    my $idx    = $db->{_worker_idx};
+    my $worker = $db->{_workers}[$idx];
+
+    $db->{_worker_idx} = ($idx + 1) % @{$db->{_workers}};
+
+    return $worker->{instance};
+}
+
+sub _start_health_checks {
+    my ($async_db, $interval) = @_;
+
+    return if $interval <= 0;
+
+    # Try to create the timer
+    eval {
+        require IO::Async::Timer::Periodic;
+
+        my $timer = IO::Async::Timer::Periodic->new(
+            interval => $interval,
+            on_tick  => sub {
+                # Don't use async here - just fire and forget
+                _health_check($async_db)->retain;
+            },
+        );
+
+        $async_db->{_loop}->add($timer);
+        $timer->start;
+
+        $async_db->{_health_check_timer} = $timer;
+    };
+
+    if ($@) {
+        # If repeat fails, try a different approach or disable health checks
+        warn "Failed to start health checks: $@" if ASYNC_TRACE;
+    }
+}
+
+sub _health_check {
+    my $async_db = shift;
+
+    my @checks = map {
+        my $worker_info = $_;
+        my $worker = $worker_info->{instance};
+        $worker->call(
+            args => [
+                $async_db->{_schema_class},
+                $async_db->{_connect_info},
+                $async_db->{_workers_config},
+                'health_check',
+            ],
+            timeout => 5,
+        )->then(sub {
+            $worker_info->{healthy} = 1;
+            return Future->done(1);
+        }, sub {
+            $worker_info->{healthy} = 0;
+            return Future->done(0);
+        })
+    } @{$async_db->{_workers}};
+
+    return Future->wait_all(@checks)->then(sub {
+        my @results = @_;
+        my $healthy_count = grep { $_->get } @results;
+
+        _record_metric($async_db, 'set', 'db_async_workers_active', $healthy_count);
+
+        return Future->done($healthy_count);
+    });
+}
+
+sub _record_metric {
+    my ($async_db, $type, $name, @args) = @_;
+
+    return unless $async_db->{_enable_metrics} && defined $METRICS;
+
+    if ($type eq 'inc') {
+        $METRICS->inc($name, @args);
+    }
+    elsif ($type eq 'observe') {
+        $METRICS->observe($name, @args);
+    }
+    elsif ($type eq 'set') {
+        $METRICS->set($name, @args);
+    }
+}
+
 sub _resolve_placeholders {
     my ($item, $reg) = @_;
     return unless defined $item;
@@ -790,14 +804,18 @@ sub _build_default_cache {
 
 sub _normalise_prefetch {
     my $pref = shift;
+
     return {} unless $pref;
     return { $pref => undef } unless ref $pref;
+
     if (ref $pref eq 'ARRAY') {
         return { map { %{ _normalise_prefetch($_) } } @$pref };
     }
+
     if (ref $pref eq 'HASH') {
         return $pref; # Already a spec
     }
+
     return {};
 }
 
