@@ -1,7 +1,148 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.46';
+$DBIx::Class::Async::VERSION   = '0.50';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
+
+=encoding utf8
+
+=head1 NAME
+
+DBIx::Class::Async - Non-blocking, multi-worker asynchronous wrapper for DBIx::Class
+
+=head1 VERSION
+
+Version 0.50
+
+=head1 QUICK START
+
+This example demonstrates how to set up a small C<SQLite> database and
+perform an asynchronous B<"Create and Count"> operation.
+
+    use strict;
+    use warnings;
+    use IO::Async::Loop;
+    use DBIx::Class::Async::Schema;
+
+    my $loop = IO::Async::Loop->new;
+
+    # 1. Connect to your database
+    my $schema = DBIx::Class::Async::Schema->connect(
+        "dbi:SQLite:dbname=myapp.db", undef, undef, {},
+        {
+            workers      => 2,              # Keep 2 database connections ready
+            schema_class => 'MyApp::Schema' # Your DBIC Schema name
+        }
+    );
+
+    # 2. Deploy (Create tables if they don't exist)
+    $schema->await($schema->deploy);
+
+    # 3. Non-blocking workflow
+    # We don't "wait" for the DB; we tell the loop what to do when it's done.
+    $schema->resultset('User')
+           ->create({ name => 'Starlight', email => 'star@perl.org' })
+           ->then(
+                sub {
+                    return $schema->resultset('User')->count;
+                })
+           ->on_done(
+                sub {
+                    my $count = shift;
+                    print "User saved! Total users now: $count\n";
+                })
+           ->on_fail(
+                sub {
+                    warn "Something went wrong: @_\n";
+                });
+
+    # 4. Start the engine
+    $loop->run;
+
+=head1 SYNOPSIS
+
+    use IO::Async::Loop;
+    use DBIx::Class::Async::Schema;
+
+    my $loop = IO::Async::Loop->new;
+
+    # Connect returns a "Virtual Schema" that behaves like DBIC
+    # but returns Futures instead of data.
+    my $schema = DBIx::Class::Async::Schema->connect(
+        "dbi:SQLite:dbname=app.db", undef, undef, {},
+        {
+            workers      => 4,             # Parallel database connections
+            schema_class => 'My::Schema',  # Your standard DBIC Schema
+            async_loop   => $loop,
+        }
+    );
+
+    # 1. Simple CRUD (Returns a Future)
+    my $future = $schema->resultset('User')->find(1);
+
+    $future->on_done(sub {
+        my $user = shift;
+        print "Found: " . $user->name . "\n" if $user;
+    });
+
+    # 2. Modern Async/Await style
+    async sub get_user_count {
+        my $count = await $schema->resultset('User')->count;
+        return $count;
+    }
+
+    # 3. Batch Transactions
+    my $tx = await $schema->txn_do([
+        { action => 'create', resultset => 'User', data => { name => 'Alice' }, name => 'new_user'  },
+        { action => 'create', resultset => 'Log',  data => { msg  => "Created user \$new_user.id" } }
+    ]);
+
+=head1 THE ASYNC DESIGN APPROACH
+
+The "Real Truth" about L<DBIx::Class> is that it is inherently synchronous. Under the hood, L<DBI> and most database drivers (like L<DBD::SQLite> or L<DBD::mysql>) block the entire Perl process while waiting for the database to respond.
+
+=head2 How it used to be (The Old Design)
+
+In traditional async Perl, developers often tried to wrap DBIC calls in a simple L<Future>. However, because the underlying L<DBI> call was still blocking, one slow query would "freeze" the entire event loop. Your UI would hang, and other network requests would stop.
+
+=head2 How we do it now (The "Bridge & Worker" Design)
+
+C<DBIx::Class::Async> uses a B<Worker-Pool Architecture>.
+
+=over 4
+
+=item * The Bridge (Main Process)
+
+When you call C<find>, C<search>, or C<create>, the main process doesn't talk to the database. It packages your request and sends it over a pipe to an available worker. It then immediately returns a L<Future> and goes back to work handling other events.
+
+=item * The Workers (Background Processes)
+
+We maintain a pool of background processes. Each worker has its own dedicated connection to the database. The worker performs the blocking DBIC call, serialises the result, and sends it back to the Bridge.
+
+=item * The Result
+
+The Bridge receives the data, resolves the C<Future>, and your code continues.
+
+=back
+
+=head2 Why this is better:
+
+=over 4
+
+=item * Zero Loop Freezing
+
+Even if a query takes 10 seconds, your main application loop remains 100% responsive.
+
+=item * True Parallelism
+
+With 4 workers, you can execute 4 heavy database queries simultaneously. Standard DBIC can only do 1 at a time.
+
+=item * Automatic Serialisation
+
+We handle the complex task of turning "live" DBIC objects into data structures that can safely travel between processes.
+
+=back
+
+=cut
 
 use strict;
 use warnings;
@@ -32,6 +173,21 @@ use constant {
     HEALTH_CHECK_INTERVAL => 300,
 };
 
+=head1 METHODS
+
+=head2 create_async_db
+
+Initialises the async environment and spawns workers.
+
+    my $db = DBIx::Class::Async->create_async_db(
+        schema_class  => 'MyApp::Schema',
+        connect_info  => [ 'dbi:SQLite:db.sqlite' ],
+        workers       => 4,
+        cache_ttl     => 300, # 5 minutes
+        enable_retry  => 1,
+    );
+
+=cut
 
 sub create_async_db {
     my ($class, %args) = @_;
@@ -115,32 +271,44 @@ sub create_async_db {
     return $async_db;
 }
 
-sub disconnect_async_db {
-    my ($async_db) = @_;
+=head2 disconnect
 
-    return unless $async_db && ref $async_db eq 'HASH';
+Gracefully shuts down all background workers and clears timers. Always call this before your application exits.
+
+    DBIx::Class::Async->disconnect($db);
+
+=cut
+
+sub disconnect {
+    my ($db) = @_;
+
+    return unless $db && ref $db eq 'HASH';
 
     # 1. Clear the health check timer
-    if ($async_db->{_health_check_timer}) {
-        $async_db->{_loop}->remove($async_db->{_health_check_timer});
-        delete $async_db->{_health_check_timer};
+    if ($db->{_health_check_timer}) {
+        $db->{_loop}->remove($db->{_health_check_timer});
+        delete $db->{_health_check_timer};
     }
 
     # 2. Shutdown workers
-    if ($async_db->{_workers}) {
-        foreach my $worker_info (@{ $async_db->{_workers} }) {
+    if ($db->{_workers}) {
+        foreach my $worker_info (@{ $db->{_workers} }) {
             if (my $instance = $worker_info->{instance}) {
-                $async_db->{_loop}->remove($instance);
+                $db->{_loop}->remove($instance);
             }
         }
-        $async_db->{_workers} = [];
+        $db->{_workers} = [];
     }
 
     # 3. Final state update
-    $async_db->{_is_connected} = 0;
+    $db->{_is_connected} = 0;
 
     return 1;
 }
+
+#
+#
+# PRIVATE METHODS
 
 sub _call_worker {
     my ($db, $operation, @args) = @_;
@@ -210,9 +378,9 @@ sub _call_worker {
 }
 
 sub _init_workers {
-    my $async_db = shift;
+    my $db = shift;
 
-    for my $worker_id (1..$async_db->{_workers_config}{_count}) {
+    for my $worker_id (1..$db->{_workers_config}{_count}) {
         my $worker = IO::Async::Function->new(
             code => sub {
                 use strict;
@@ -262,7 +430,7 @@ sub _init_workers {
 
                 unless (exists $schema_cache->{$pid}) {
                     if (ASYNC_TRACE) {
-                        warn "[PID $$] Worker initializing new schema connection";
+                        warn "[PID $$] Worker initialising new schema connection";
                         warn "[PID $$] About to require $schema_class";
                     }
 
@@ -306,7 +474,7 @@ sub _init_workers {
 
                     $schema_cache->{$pid} = $schema;
 
-                    warn "[PID $$] Worker initialization complete"
+                    warn "[PID $$] Worker initialisation complete"
                         if ASYNC_TRACE;
                 }
 
@@ -608,22 +776,18 @@ sub _init_workers {
             max_workers => 1,
         );
 
-        $async_db->{_loop}->add($worker);
+        $db->{_loop}->add($worker);
 
-        push @{$async_db->{_workers}}, {
+        push @{$db->{_workers}}, {
             instance => $worker,
-            healthy => 1,
-            pid => undef,
+            healthy  => 1,
+            pid      => undef,
         };
     }
 }
 
-#
-#
-# PRIVATE METHODS
-
 sub _init_metrics {
-    my $async_db = shift;
+    my $db = shift;
 
     # Try to load Metrics::Any
     eval {
@@ -641,7 +805,7 @@ sub _init_metrics {
 
     # Silently ignore if Metrics::Any is not available
     if ($@) {
-        $async_db->{_enable_metrics} = 0;
+        $db->{_enable_metrics} = 0;
         undef $METRICS;
     }
 }
@@ -664,7 +828,7 @@ sub _next_worker {
 }
 
 sub _start_health_checks {
-    my ($async_db, $interval) = @_;
+    my ($db, $interval) = @_;
 
     return if $interval <= 0;
 
@@ -676,14 +840,14 @@ sub _start_health_checks {
             interval => $interval,
             on_tick  => sub {
                 # Don't use async here - just fire and forget
-                _health_check($async_db)->retain;
+                _health_check($db)->retain;
             },
         );
 
-        $async_db->{_loop}->add($timer);
+        $db->{_loop}->add($timer);
         $timer->start;
 
-        $async_db->{_health_check_timer} = $timer;
+        $db->{_health_check_timer} = $timer;
     };
 
     if ($@) {
@@ -693,42 +857,44 @@ sub _start_health_checks {
 }
 
 sub _health_check {
-    my $async_db = shift;
+    my $db = shift;
 
     my @checks = map {
         my $worker_info = $_;
         my $worker = $worker_info->{instance};
         $worker->call(
             args => [
-                $async_db->{_schema_class},
-                $async_db->{_connect_info},
-                $async_db->{_workers_config},
+                $db->{_schema_class},
+                $db->{_connect_info},
+                $db->{_workers_config},
                 'health_check',
             ],
             timeout => 5,
-        )->then(sub {
+        )->then(
+        sub {
             $worker_info->{healthy} = 1;
             return Future->done(1);
-        }, sub {
+        },
+        sub {
             $worker_info->{healthy} = 0;
             return Future->done(0);
         })
-    } @{$async_db->{_workers}};
+    } @{$db->{_workers}};
 
     return Future->wait_all(@checks)->then(sub {
         my @results = @_;
         my $healthy_count = grep { $_->get } @results;
 
-        _record_metric($async_db, 'set', 'db_async_workers_active', $healthy_count);
+        _record_metric($db, 'set', 'db_async_workers_active', $healthy_count);
 
         return Future->done($healthy_count);
     });
 }
 
 sub _record_metric {
-    my ($async_db, $type, $name, @args) = @_;
+    my ($db, $type, $name, @args) = @_;
 
-    return unless $async_db->{_enable_metrics} && defined $METRICS;
+    return unless $db->{_enable_metrics} && defined $METRICS;
 
     if ($type eq 'inc') {
         $METRICS->inc($name, @args);
@@ -775,7 +941,7 @@ sub _resolve_placeholders {
 
 sub _interpolate_string {
     my ($string, $reg) = @_;
-    return $string unless $string =~ /\$/; # Optimization: skip if no $
+    return $string unless $string =~ /\$/;
 
     # Use a regex to find all keys in the register and replace them
     # Example: "INSERT INTO logs VALUES ('Created user $user.id')"
@@ -854,5 +1020,142 @@ sub _serialise_row_with_prefetch {
     }
     return \%data;
 }
+
+=head1 PERFORMANCE TIPS
+
+=over 4
+
+=item * Worker Count & CPU Affinity
+
+Adjust the C<workers> parameter based on your database connection limits and expected concurrency. Since each worker is a separate process, 2-4 workers per CPU core is the sweet spot. Too many workers can cause context-switching overhead on your OS.
+
+=item * Caching Strategy
+
+The new design uses C<CHI> for memory-efficient caching. For read-heavy workloads, ensure C<cache_ttl> is set. Setting it to C<0> will disable caching, which is useful for data that changes every second.
+
+=item * Batch Operations (Concurrent Execution)
+
+Instead of sequential C<await> calls, which force workers to sit idle, use C<Future->wait_all> or C<Future->needs_all> to fire multiple queries across your worker pool simultaneously.
+
+=item * Connection Persistence
+
+Each worker maintains a persistent connection to the database. This eliminates the "connection tax" (handshake time) for every query. Monitor your database's C<max_connections> setting to ensure it can handle C<Total Apps * Workers Per App>.
+
+=item * Timeout Guardrails
+
+The C<query_timeout> (default 30s) is your safety net. In the new design, a hung query only blocks B<one> worker; the others stay active. Without a timeout, a single "zombie" query could permanently reduce your pool size.
+
+=back
+
+=head1 ERROR HANDLING
+
+The bridge uses C<< Future->fail >> to propagate errors from the workers back to your main process. You should handle these using C<await> within a C<try/catch> block or the C<< ->catch >> method.
+
+=over 4
+
+=item * Worker Connectivity
+
+If a worker cannot connect to the DB, it will throw an exception during the first query or a health check.
+
+=item * Automatic Retries
+
+If C<enable_retry> is true, the bridge will automatically retry queries that fail due to transient issues (like database deadlocks) using an exponential backoff (starting at 1s, doubling each time).
+
+=item * Serialisation Failures
+
+Because data must travel between processes, any custom objects in your ResultSets must be serialiisable. The new design handles most DBIC inflation automatically, but be wary of passing "live" filehandles or sockets.
+
+=back
+
+=head1 METRICS
+
+If C<< enable_metrics => 1 >> is passed to the constructor and L<Metrics::Any> is available, the following gauges and counters are tracked:
+
+    +------------------------------------+-----------+-----------------------------------------------------+
+    | Metric                             | Type      | Description                                         |
+    +------------------------------------+-----------+-----------------------------------------------------+
+    | C<db_async_queries_total>          | Counter   | Total number of operations sent to workers.         |
+    | C<db_async_cache_hits_total>       | Counter   | Queries resolved via the internal C<CHI> cache.     |
+    | C<db_async_query_duration_seconds> | Histogram | Latency distribution of database operations.        |
+    | C<db_async_workers_active>         | Gauge     | Number of workers passing the periodic health check.|
+    +------------------------------------+-----------+-----------------------------------------------------+
+
+=head1 DEDICATION
+
+This module is dedicated to the memory of B<Matt S. Trout (mst)>,
+a brilliant contributor to the Perl community, L<DBIx::Class> core developer,
+and friend who is deeply missed.
+
+=head1 AUTHOR
+
+Mohammad Sajid Anwar, C<< <mohammad.anwar at yahoo.com> >>
+
+=head1 REPOSITORY
+
+L<https://github.com/manwar/DBIx-Class-Async>
+
+=head1 BUGS
+
+Please report any bugs or feature requests through the web interface at L<https://github.com/manwar/DBIx-Class-Async/issues>.
+I will  be notified and then you'll automatically be notified of progress on your
+bug as I make changes.
+
+=head1 SUPPORT
+
+You can find documentation for this module with the perldoc command.
+
+    perldoc DBIx::Class::Async
+
+You can also look for information at:
+
+=over 4
+
+=item * BUG Report
+
+L<https://github.com/manwar/DBIx-Class-Async/issues>
+
+=item * CPAN Ratings
+
+L<http://cpanratings.perl.org/d/DBIx-Class-Async>
+
+=item * Search MetaCPAN
+
+L<https://metacpan.org/dist/DBIx-Class-Async/>
+
+=back
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2026 Mohammad Sajid Anwar.
+
+This program  is  free software; you can redistribute it and / or modify it under
+the  terms  of the the Artistic License (2.0). You may obtain a  copy of the full
+license at:
+L<http://www.perlfoundation.org/artistic_license_2_0>
+Any  use,  modification, and distribution of the Standard or Modified Versions is
+governed by this Artistic License.By using, modifying or distributing the Package,
+you accept this license. Do not use, modify, or distribute the Package, if you do
+not accept this license.
+If your Modified Version has been derived from a Modified Version made by someone
+other than you,you are nevertheless required to ensure that your Modified Version
+ complies with the requirements of this license.
+This  license  does  not grant you the right to use any trademark,  service mark,
+tradename, or logo of the Copyright Holder.
+This license includes the non-exclusive, worldwide, free-of-charge patent license
+to make,  have made, use,  offer to sell, sell, import and otherwise transfer the
+Package with respect to any patent claims licensable by the Copyright Holder that
+are  necessarily  infringed  by  the  Package. If you institute patent litigation
+(including  a  cross-claim  or  counterclaim) against any party alleging that the
+Package constitutes direct or contributory patent infringement,then this Artistic
+License to you shall terminate on the date that such litigation is filed.
+Disclaimer  of  Warranty:  THE  PACKAGE  IS  PROVIDED BY THE COPYRIGHT HOLDER AND
+CONTRIBUTORS  "AS IS'  AND WITHOUT ANY EXPRESS OR IMPLIED WARRANTIES. THE IMPLIED
+WARRANTIES    OF   MERCHANTABILITY,   FITNESS   FOR   A   PARTICULAR  PURPOSE, OR
+NON-INFRINGEMENT ARE DISCLAIMED TO THE EXTENT PERMITTED BY YOUR LOCAL LAW. UNLESS
+REQUIRED BY LAW, NO COPYRIGHT HOLDER OR CONTRIBUTOR WILL BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL,  OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE
+OF THE PACKAGE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+=cut
 
 1; # End of DBIx::Class::Async

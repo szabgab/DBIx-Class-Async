@@ -1,5 +1,51 @@
 package DBIx::Class::Async::Schema;
 
+=encoding utf8
+
+=head1 NAME
+
+DBIx::Class::Async::Schema - Non-blocking, worker-pool based Proxy for DBIx::Class::Schema
+
+=head1 VERSION
+
+Version 0.50
+
+=head1 SYNOPSIS
+
+    use IO::Async::Loop;
+    use DBIx::Class::Async::Schema;
+
+    my $loop = IO::Async::Loop->new;
+
+    # Connect returns a proxy object immediately
+    my $schema = DBIx::Class::Async::Schema->connect(
+        "dbi:SQLite:dbname=myapp.db", undef, undef, {},
+        {
+            schema_class   => 'MyApp::Schema',
+            workers        => 4,
+            enable_metrics => 1,
+            loop           => $loop,
+        }
+    );
+
+    # Use the 'await' helper for one-off scripts
+    my $count = $schema->await( $schema->resultset('User')->count_future );
+
+    # Or use standard Future chaining for web/event apps
+    $schema->resultset('User')->find_future(1)->then(sub {
+        my $user = shift;
+        print "Found async user: " . $user->name;
+    })->retain;
+
+=head1 DESCRIPTION
+
+C<DBIx::Class::Async::Schema> acts as a non-blocking bridge to your standard
+L<DBIx::Class> schemas. Instead of executing queries in the main event loop
+(which would block your UI or web server), this module offloads queries to a
+managed pool of background worker processes.
+
+=cut
+
 use strict;
 use warnings;
 use utf8;
@@ -17,30 +63,27 @@ use Data::Dumper;
 our $METRICS;
 use constant ASYNC_TRACE => $ENV{ASYNC_TRACE} || 0;
 
-sub await {
-    my ($self, $future) = @_;
+=head1 METHODS
 
-    my $loop = $self->{_async_db}->{_loop};
-    my @results = $loop->await($future);
+=head2 connect
 
-    # Unwrap nested Futures
-    while (@results == 1
-           && defined $results[0]
-           && Scalar::Util::blessed($results[0])
-           && $results[0]->isa('Future')) {
+    my $schema = DBIx::Class::Async::Schema->connect($dsn, $user, $pass, $dbi_attrs, \%async_attrs);
 
-        if (!$results[0]->is_ready) {
-            @results = $loop->await($results[0]);
-        } elsif ($results[0]->is_failed) {
-            my ($error) = $results[0]->failure;
-            die $error;
-        } else {
-            @results = $results[0]->get;
-        }
-    }
+Initialises the worker pool and returns a proxy schema instance.
 
-    return wantarray ? @results : $results[0];
-}
+=over 4
+
+=item * C<schema_class> (Required): The name of your existing DBIC Schema class.
+
+=item * C<workers>: Number of background processes (Default: 2).
+
+=item * C<loop>: An L<IO::Async::Loop> instance. If not provided, one will be created.
+
+=item * C<enable_retry>: Automatically retry deadlocks/transient errors.
+
+=back
+
+=cut
 
 sub connect {
     my ($class, @args) = @_;
@@ -102,6 +145,31 @@ sub connect {
     return $self;
 }
 
+sub await {
+    my ($self, $future) = @_;
+
+    my $loop = $self->{_async_db}->{_loop};
+    my @results = $loop->await($future);
+
+    # Unwrap nested Futures
+    while (@results == 1
+           && defined $results[0]
+           && Scalar::Util::blessed($results[0])
+           && $results[0]->isa('Future')) {
+
+        if (!$results[0]->is_ready) {
+            @results = $loop->await($results[0]);
+        } elsif ($results[0]->is_failed) {
+            my ($error) = $results[0]->failure;
+            die $error;
+        } else {
+            @results = $results[0]->get;
+        }
+    }
+
+    return wantarray ? @results : $results[0];
+}
+
 # Cache specific
 sub cache_hits    { shift->{_async_db}->{_stats}->{_cache_hits}   // 0 }
 sub cache_misses  { shift->{_async_db}->{_stats}->{_cache_misses} // 0 }
@@ -125,7 +193,6 @@ sub class {
         croak("No such source '$source_name'");
     }
 
-    # Return the result class string (e.g., 'TestSchema::Result::User')
     return $source->{result_class};
 }
 
@@ -135,7 +202,9 @@ sub clone {
     # 1. Determine worker count
     my $orig_db = $self->{_async_db};
     my $worker_count = $args{workers}
-        || ($orig_db && $orig_db->{_workers_config} && $orig_db->{_workers_config}{_count})
+        || ($orig_db
+            && $orig_db->{_workers_config}
+            && $orig_db->{_workers_config}{_count})
         || 2;
 
     # 2. Re-create the async engine
@@ -168,8 +237,6 @@ sub clone {
 
     return $new_self;
 }
-
-############################################################################
 
 sub deploy {
     my ($self, $sqlt_args, $dir) = @_;
@@ -213,8 +280,6 @@ sub disconnect {
     return $self;
 }
 
-############################################################################
-
 sub health_check {
     my ($self) = @_;
 
@@ -239,8 +304,6 @@ sub health_check {
         return Future->done($healthy_count);
     });
 }
-
-############################################################################
 
 sub inflate_column {
     my ($self, $source_name, $column, $handlers) = @_;
@@ -275,17 +338,9 @@ sub inflate_column {
     $self->{_async_db}{_custom_inflators}{$source_name}{$column} = $handlers;
 }
 
-############################################################################
-
-sub loop  { shift->{_async_db}->{_loop}  }
-sub stats { shift->{_async_db}->{_stats} }
-
-sub native_schema {
-    my $self = shift;
-    return $self->{_native_schema};
-}
-
-############################################################################
+sub loop          { shift->{_async_db}->{_loop}  }
+sub stats         { shift->{_async_db}->{_stats} }
+sub native_schema { shift->{_native_schema}      }
 
 sub populate {
     my ($self, $source_name, $data) = @_;
@@ -301,8 +356,6 @@ sub populate {
     # This creates the RS and immediately triggers the bulk insert logic
     return $self->resultset($source_name)->populate($data);
 }
-
-############################################################################
 
 sub register_class {
     my ($self, $source_name, $result_class) = @_;
@@ -348,6 +401,16 @@ sub register_source {
     return $source;
 }
 
+=head2 resultset
+
+    my $rs = $schema->resultset('Source');
+
+Returns a L<DBIx::Class::Async::ResultSet> object. This RS behaves like
+standard DBIC but provides C<*_future> variants (e.g., C<all_future>,
+C<count_future>).
+
+=cut
+
 sub resultset {
     my ($self, $source_name) = @_;
 
@@ -375,8 +438,6 @@ sub resultset {
     );
 }
 
-############################################################################
-
 sub search_with_prefetch {
     my ($self, $source_name, $cond, $prefetch, $attrs) = @_;
 
@@ -402,15 +463,12 @@ sub set_default_context {
 
 sub schema_version {
     my $self  = shift;
-
-    # Updated to match your actual internal state key
     my $class = $self->{_async_db}->{_schema_class};
 
     unless ($class) {
         croak("schema_class is not defined in " . ref($self));
     }
 
-    # Use 'can' to safely check for the method on the class
     return $class->schema_version if $class->can('schema_version');
 
     return undef;
@@ -419,7 +477,7 @@ sub schema_version {
 sub sync_metadata {
     my ($self) = @_;
 
-    my $async_db = $self->{_async_db}; # Direct access
+    my $async_db = $self->{_async_db};
     my @futures;
 
     # Ping every worker in the pool
@@ -430,11 +488,7 @@ sub sync_metadata {
     return Future->wait_all(@futures);
 }
 
-sub schema_class {
-    my ($self) = @_;
-
-    return $self->{_async_db}->{_schema_class};
-}
+sub schema_class { shift->{_async_db}->{_schema_class}; }
 
 sub source_ {
     my ($self, $source_name) = @_;
@@ -446,19 +500,13 @@ sub source_ {
 
         $self->{_sources_cache}{$source_name} = $source;
     }
+
     return $self->{_sources_cache}{$source_name};
 }
 
-sub sources_ {
-    my $self = shift;
-    return $self->{_native_schema}->sources;
-}
+sub sources_ { shift->{_native_schema}->sources; }
 
-sub storage {
-    my $self = shift;
-    return $self->{_storage}; # Your Async storage wrapper
-}
-
+sub storage  { shift->{_storage}; }
 
 sub source {
     my ($self, $source_name) = @_;
@@ -505,8 +553,6 @@ sub sources {
 
     return @sources;
 }
-
-############################################################################
 
 sub txn_begin {
     my $self = shift;
@@ -593,8 +639,6 @@ sub txn_batch {
     });
 }
 
-############################################################################
-
 sub unregister_source {
     my ($self, $source_name) = @_;
 
@@ -621,7 +665,29 @@ sub unregister_source {
     return $self;
 }
 
-############################################################################
+sub AUTOLOAD {
+    my $self = shift;
+
+    return unless ref $self;
+
+    our $AUTOLOAD;
+    my ($method) = $AUTOLOAD =~ /([^:]+)$/;
+
+    return if $method eq 'DESTROY';
+
+    if ($self->{_async_db} && exists $self->{_async_db}->{schema}) {
+        my $real_schema = $self->{_async_db}->{schema};
+        if ($real_schema->can($method)) {
+            return $real_schema->$method(@_);
+        }
+    }
+
+    croak "Method $method not found in " . ref($self);
+}
+
+#
+#
+# PRIVATE METHODS
 
 sub _record_metric {
     my ($self, $type, $name, @args) = @_;
@@ -668,8 +734,8 @@ sub _resolve_source {
 
     # 2. Extract only what we need for the Async side
     return {
-        result_class => $source->result_class,
-        columns      => [ $source->columns ],
+        result_class  => $source->result_class,
+        columns       => [ $source->columns ],
         relationships => {
             # We map relationships to know how to handle joins/prefetch later
             map { $_ => $source->relationship_info($_) } $source->relationships
@@ -694,24 +760,28 @@ sub _build_inflator_map {
                 };
             }
             # Explicit check for JSON Serializer
-            elsif ($info->{serializer_class} && $info->{serializer_class} eq 'JSON') {
+            elsif ($info->{serializer_class}
+                   && $info->{serializer_class} eq 'JSON') {
                 require JSON;
                 my $json = JSON->new->utf8->allow_nonref;
                 $map->{$source_name}{$col} = {
                     inflate => sub {
                         my $val = shift;
-                        return $val if !defined $val || ref($val); # Skip if NULL or already a HASH
+                        return $val if !defined $val || ref($val);
 
                         my $decoded;
-                        eval { $decoded = $json->decode($val); 1; } or do {
+                        eval  {
+                            $decoded = $json->decode($val); 1;
+                        }
+                        or do {
                             warn "Failed to inflate JSON in $col: $@ (Value: $val)";
-                            return $val; # Return raw string so the app doesn't crash
+                            return $val;
                         };
                         return $decoded;
                     },
                     deflate => sub {
                         my $val = shift;
-                        return $val if !defined $val || !ref($val); # Skip if NULL or already a string
+                        return $val if !defined $val || !ref($val);
 
                         return $json->encode($val);
                     },
@@ -723,26 +793,286 @@ sub _build_inflator_map {
     return $map;
 }
 
-############################################################################
+=head1 METADATA & REFLECTION
 
-sub AUTOLOAD {
-    my $self = shift;
+=over 4
 
-    return unless ref $self;
+=item B<source( $source_name )>
 
-    our $AUTOLOAD;
-    my ($method) = $AUTOLOAD =~ /([^:]+)$/;
+Returns the L<DBIx::Class::ResultSource> for the given name.
 
-    return if $method eq 'DESTROY';
+Unlike standard DBIC, this uses a B<persistent metadata provider> (a cached
+internal schema) to ensure that ResultSource objects remain stable across
+async calls without re-connecting to the database unnecessarily.
 
-    if ($self->{_async_db} && exists $self->{_async_db}->{schema}) {
-        my $real_schema = $self->{_async_db}->{schema};
-        if ($real_schema->can($method)) {
-            return $real_schema->$method(@_);
+=item B<sources()>
+
+Returns a list of all source names available in the schema. This creates a
+temporary, light-weight connection to extract the current schema structure
+and then immediately disconnects to save resources.
+
+=item B<class( $source_name )>
+
+Returns the Result Class string (e.g., C<MyApp::Schema::Result::User>) for
+the given source. Useful for dynamic inspections.
+
+=item B<schema_class()>
+
+Returns the name of the base L<DBIx::Class> schema class being proxied.
+
+=item B<schema_version()>
+
+Returns the version number defined in your DBIC Schema class, if available.
+
+=back
+
+=head1 TRANSACTION MANAGEMENT
+
+=over 4
+
+=item B<txn_begin / txn_commit / txn_rollback>
+
+These methods return L<Future> objects. Because workers are persistent,
+calling C<txn_begin> pins your current logic to a specific worker until
+C<commit> or C<rollback> is called.
+
+B<Note:> Use these carefully in an async loop to avoid "Worker Starvation"
+where all workers are waiting on long-running manual transactions.
+
+=item B<txn_batch( @operations | \@operations )>
+
+The high-performance alternative to manual transactions. It sends a "bundle"
+of operations to a worker to be executed in a single atomic block.
+
+    $schema->txn_batch(
+        { type      => 'create',
+          resultset => 'User',
+          data      => { name => 'Alice' }
+        },
+        { type      => 'update',
+          resultset => 'Stats',
+          data      => { count => 1 },
+          where     => { id    => 5 }
         }
-    }
+    );
 
-    croak "Method $method not found in " . ref($self);
-}
+=back
+
+=head1 LIFECYCLE & STATE
+
+=over 4
+
+=item B<clone( workers => $count )>
+
+Creates a fresh instance of the Async Schema. This is useful if you need a
+separate pool of workers for "heavy" reporting queries vs. "light" web queries.
+
+=item B<disconnect()>
+
+Gracefully shuts down all background worker processes and flushes the metadata
+caches. Use this during app shutdown to prevent zombie processes.
+
+=item B<storage()>
+
+Returns the C<DBIx::Class::Async::Storage::DBI> wrapper. This is provided for
+compatibility with components that expect to inspect the DBIC storage layer.
+
+=back
+
+=head1 UTILITIES
+
+=over 4
+
+=item B<populate( $source_name, \@data )>
+
+Performs a high-speed bulk insert. This delegates to the ResultSet's C<populate>
+logic and is significantly faster than calling C<create> in a loop.
+
+=item B<search_with_prefetch( $source_name, \%cond, \@prefetch, \%attrs )>
+
+A specialised shortcut for complex joins. It forces C<collapse => 1> to ensure
+that the data structure returned from the worker process is properly "folded"
+into objects, preventing Cartesian product issues over IPC.
+
+=back
+
+=head1 Recursive Future Unwrapping
+
+The C<await> method in this package implements a recursive unwrapping strategy.
+In complex Async applications, it is common for a Future to return *another*
+Future (e.g., a C<search> that triggers a C<prefetch> or a C<txn_do>).
+
+Traditional C<await> calls might return the inner Future object itself rather
+than the data. This implementation detects nested Futures and continues to
+resolve them until the final data payload is reached.
+
+=over 4
+
+=item 1. Resolves the top-level Future via the L<IO::Async::Loop>.
+
+=item 2. Inspects the result; if it is another L<Future>, it re-enters the loop.
+
+=item 3. Throws an exception immediately if any Future in the chain fails.
+
+=item 4. Returns the final "leaf" value to the caller.
+
+=back
+
+=head1 CUSTOM INFLATION & SERIALISATION
+
+Because this module uses a Worker-Pool architecture, data must travel across
+process boundaries. Standard Perl objects (like L<DateTime> or L<JSON> blobs)
+cannot simply be "shared" as live memory.
+
+C<DBIx::Class::Async::Schema> automatically detects your DBIC C<inflate_column>
+definitions and mirrors them in the Worker processes.
+
+=head2 How it works
+
+=over 4
+
+=item 1. Deflation (Main to Worker)
+
+When you pass an object to C<create> or C<update>, the bridge deflates it into
+a storable format before sending it to the worker.
+
+=item 2. Inflation (Worker to Main)
+
+When results come back, the bridge automatically re-applies your C<inflate> coderefs
+to turn raw strings back into rich objects.
+
+=back
+
+=head2 JSON Support
+
+The new design includes built-in support for C<serializer_class => 'JSON'>.
+If detected in your ResultSource metadata, it will automatically handle the
+C<decode>/C<encode> cycle using L<JSON> in a non-blocking manner.
+
+=head2 Manual Registration
+
+If you have complex objects that aren't handled by standard DBIC inflation,
+you can register them manually:
+
+    $schema->inflate_column('User', 'preferences', {
+        inflate => sub { my $val = shift; decode_json($val) },
+        deflate => sub { my $obj = shift; encode_json($obj) },
+    });
+
+=head1 PERFORMANCE TIPS
+
+=head2 Worker Count
+
+Adjust the C<workers> parameter based on your database connection limits.
+Typically **2-4 workers per CPU core** works well. Each worker maintains its
+own persistent DB connection.
+
+=head2 Prefetching
+
+Use C<search_with_prefetch> to fetch related data in one trip across the
+process boundary. This significantly reduces the overhead of IPC (Inter-Process
+Communication).
+
+=head1 ERROR HANDLING
+
+All methods return L<Future> objects. Errors from workers (SQL errors,
+timeouts, connection drops) are propagated as Future failures. Use
+C<< ->catch >> or C<try/catch> with C<await>.
+
+=head1 STATISTICS & METRICS
+
+If C<enable_metrics> is enabled, you can query the internal state:
+
+=over 4
+
+=item * C<total_queries()>: Total operations processed.
+
+=item * C<cache_hits()>: Operations resolved via the internal cache.
+
+=item * C<error_count()>: Total failed operations.
+
+=back
+
+=head1 EXTENSIBILITY & AUTOLOAD
+
+If you call a method on this object that is not defined in the Async package,
+it will attempt to proxy the call to the B<Native DBIC Schema>.
+
+This allows you to use custom methods defined in your C<MyApp::Schema> class
+seamlessly. However, be aware that calls made via C<AUTOLOAD> are executed in
+the **Parent Process context** and may be blocking unless they specifically
+return a L<Future>.
+
+=head1 AUTHOR
+
+Mohammad Sajid Anwar, C<< <mohammad.anwar at yahoo.com> >>
+
+=head1 REPOSITORY
+
+L<https://github.com/manwar/DBIx-Class-Async>
+
+=head1 BUGS
+
+Please report any bugs or feature requests through the web interface at L<https://github.com/manwar/DBIx-Class-Async/issues>.
+I will  be notified and then you'll automatically be notified of progress on your
+bug as I make changes.
+
+=head1 SUPPORT
+
+You can find documentation for this module with the perldoc command.
+
+    perldoc DBIx::Class::Async::Schema
+
+You can also look for information at:
+
+=over 4
+
+=item * BUG Report
+
+L<https://github.com/manwar/DBIx-Class-Async/issues>
+
+=item * CPAN Ratings
+
+L<http://cpanratings.perl.org/d/DBIx-Class-Async>
+
+=item * Search MetaCPAN
+
+L<https://metacpan.org/dist/DBIx-Class-Async/>
+
+=back
+
+=head1 LICENSE AND COPYRIGHT
+
+Copyright (C) 2026 Mohammad Sajid Anwar.
+
+This program  is  free software; you can redistribute it and / or modify it under
+the  terms  of the the Artistic License (2.0). You may obtain a  copy of the full
+license at:
+L<http://www.perlfoundation.org/artistic_license_2_0>
+Any  use,  modification, and distribution of the Standard or Modified Versions is
+governed by this Artistic License.By using, modifying or distributing the Package,
+you accept this license. Do not use, modify, or distribute the Package, if you do
+not accept this license.
+If your Modified Version has been derived from a Modified Version made by someone
+other than you,you are nevertheless required to ensure that your Modified Version
+ complies with the requirements of this license.
+This  license  does  not grant you the right to use any trademark,  service mark,
+tradename, or logo of the Copyright Holder.
+This license includes the non-exclusive, worldwide, free-of-charge patent license
+to make,  have made, use,  offer to sell, sell, import and otherwise transfer the
+Package with respect to any patent claims licensable by the Copyright Holder that
+are  necessarily  infringed  by  the  Package. If you institute patent litigation
+(including  a  cross-claim  or  counterclaim) against any party alleging that the
+Package constitutes direct or contributory patent infringement,then this Artistic
+License to you shall terminate on the date that such litigation is filed.
+Disclaimer  of  Warranty:  THE  PACKAGE  IS  PROVIDED BY THE COPYRIGHT HOLDER AND
+CONTRIBUTORS  "AS IS'  AND WITHOUT ANY EXPRESS OR IMPLIED WARRANTIES. THE IMPLIED
+WARRANTIES    OF   MERCHANTABILITY,   FITNESS   FOR   A   PARTICULAR  PURPOSE, OR
+NON-INFRINGEMENT ARE DISCLAIMED TO THE EXTENT PERMITTED BY YOUR LOCAL LAW. UNLESS
+REQUIRED BY LAW, NO COPYRIGHT HOLDER OR CONTRIBUTOR WILL BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL,  OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE
+OF THE PACKAGE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+=cut
 
 1; # End of DBIx::Class::Async::Schema

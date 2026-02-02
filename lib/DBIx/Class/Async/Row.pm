@@ -1,5 +1,118 @@
 package DBIx::Class::Async::Row;
 
+=head1 NAME
+
+DBIx::Class::Async::Row - Asynchronous Row object representing a single database record.
+
+=head1 VERSION
+
+Version 0.50
+
+=head1 SYNOPSIS
+
+    # Rows are typically retrieved via a ResultSet
+    my $future = $rs->find(1);
+
+    $future->on_done(sub {
+        my $user = shift;
+
+        # Access columns (non-blocking if pre-inflated)
+        say $user->username;
+
+        # Update columns
+        $user->last_login('2026-02-02');
+
+        # Persist changes asynchronously
+        $user->update->on_done(sub {
+            say "User updated!";
+        });
+
+        # Traverse relationships (Returns a Future)
+        $user->posts->all->on_done(sub {
+            my $posts = shift;
+            say "User has " . scalar(@$posts) . " posts.";
+        });
+    });
+
+=head1 DESCRIPTION
+
+This class provides an asynchronous interface to individual database rows.
+It maintains internal state regarding "dirty" (unsaved) columns and handles
+the hand-off to the background worker for all I/O operations.
+
+=head1 ATTRIBUTES
+
+=head2 in_storage
+
+    my $bool = $row->in_storage;
+    $row->in_storage(1);
+
+Returns or sets whether the row is considered "in the database." Setting
+this to true clears the "dirty" status of all columns.
+
+=head1 PERSISTENCE METHODS
+
+=head2 update
+
+    $row->update({ status => 'active' })->then(sub { ... });
+
+If the row is in storage, dispatches an C<UPDATE> command to the worker for any
+modified (dirty) columns. Returns a L<Future> resolving to the updated row object.
+
+=head2 delete
+
+    $row->delete->on_done(sub { say "Gone!" });
+
+Asynchronously deletes the row from the database using its Primary Key.
+Upon success, C<in_storage> is set to 0.
+
+=head2 discard_changes
+
+    $row->discard_changes->then(sub { ... });
+
+Re-fetches the row data from the database, overwriting any local unsaved changes
+and resetting the "dirty" flag.
+
+=head2 copy
+
+    $row->copy({ username => 'new_user' })->then(sub { ... });
+
+Creates a new record in the database using the current row's data as a template,
+excluding Primary Keys unless explicitly provided in the changes hashref.
+
+=head1 DATA ACCESSORS
+
+=head2 get_column / set_column
+
+    my $val = $row->get_column('email');
+    $row->set_column('email', 'new@example.com');
+
+Standard DBIC-style column accessors. C<set_column> marks the column as "dirty."
+
+=head2 get_dirty_columns
+
+    my %dirty = $row->get_dirty_columns;
+
+Returns a list of key-value pairs for columns that have been modified but
+not yet saved to the database.
+
+=head1 RELATIONSHIPS
+
+=head2 related_resultset
+
+    my $rel_rs = $row->related_resultset('posts');
+
+Returns a L<DBIx::Class::Async::ResultSet> for the named relationship, pre-configured
+with the foreign key join condition.
+
+=head2 create_related
+
+    $row->create_related('posts', { title => 'New Post' });
+
+Shorthand for C<< $row->related_resultset($rel)->create($data) >>.
+
+=cut
+
 use strict;
 use warnings;
 use utf8;
@@ -9,16 +122,9 @@ use Carp;
 use Future;
 use Scalar::Util qw(blessed);
 
-
 # PRIVATE CONSTANTS
 # Protects internal attributes from being treated as database columns
 my $INTERNAL_KEYS = qr/^(?:_.*|async_db|source_name|schema|_inflation_map)$/;
-
-sub _mark_clean {
-    my $self = shift;
-    $self->{_dirty} = {};
-    return $self;
-}
 
 sub new {
     my ($class, %args) = @_;
@@ -191,20 +297,6 @@ sub delete {
     });
 }
 
-sub _spawn_rs {
-    my ($self) = @_;
-
-    die "Cannot spawn ResultSet: missing _schema_instance or _source_name"
-        unless $self->{_schema_instance} && $self->{_source_name};
-
-    return DBIx::Class::Async::ResultSet->new(
-        schema_instance => $self->{_schema_instance}, # Match ResultSet's new()
-        async_db        => $self->{_async_db},
-        source_name     => $self->{_source_name},
-        cond            => $self->ident_condition,
-    );
-}
-
 sub discard_changes {
     my $self = shift;
 
@@ -292,7 +384,6 @@ sub get_column {
     return $raw;
 }
 
-
 sub get_columns {
     my $self = shift;
     my $data = $self->{_data} || {};
@@ -310,7 +401,6 @@ sub get_columns {
 
     return wantarray ? %cols : \%cols;
 }
-
 
 sub get_dirty_columns {
     my $self = shift;
@@ -341,7 +431,8 @@ sub id {
         unless ref $self;
 
     my $source = $self->_get_source;
-    unless ($source && ref($source) && eval { $source->can('primary_columns') }) {
+    unless ($source && ref($source)
+        && eval { $source->can('primary_columns') }) {
         croak("Could not retrieve valid ResultSource for " .
               ($self->{_source_name} // 'Unknown') .
               ". Source is either missing or unblessed.");
@@ -406,12 +497,7 @@ sub insert {
     return $self->update_or_insert;
 }
 
-
-sub insert_or_update {
-    my $self = shift;
-    return $self->update_or_insert(@_);
-}
-
+sub insert_or_update { shift->update_or_insert(@_); }
 
 sub in_storage {
     my ($self, $val) = @_;
@@ -424,7 +510,6 @@ sub in_storage {
 
     return $self->{_in_storage} // 0;
 }
-
 
 sub is_column_changed {
     my ($self, $column) = @_;
@@ -439,7 +524,6 @@ sub is_column_dirty {
     return exists $self->{_dirty}{$column} ? 1 : 0;
 }
 
-
 sub make_column_dirty {
     my ($self, $column) = @_;
 
@@ -449,7 +533,6 @@ sub make_column_dirty {
 
     return $self;
 }
-
 
 sub related_resultset {
     my ($self, $rel_name, $cond, $attrs) = @_;
@@ -552,7 +635,6 @@ sub set_column {
     return $value;
 }
 
-
 sub set_columns {
     my ($self, $values) = @_;
 
@@ -565,7 +647,6 @@ sub set_columns {
 
     return $self;
 }
-
 
 sub update {
     my ($self, $values) = @_;
@@ -588,7 +669,6 @@ sub update {
     # run the UPDATE logic and clear dirty flags on success.
     return $self->update_or_insert;
 }
-
 
 sub update_or_insert {
     my ($self, $data) = @_;
@@ -792,14 +872,17 @@ sub AUTOLOAD {
             }
 
             # GETTER MODE
-            return $inner_self->{_inflated}{$method} if exists $inner_self->{_inflated}{$method};
+            return $inner_self->{_inflated}{$method}
+                if exists $inner_self->{_inflated}{$method};
 
             my $raw = $inner_self->get_column($method);
             if ($col_info->{inflate} && defined $raw) {
                 my $inflated = $col_info->{inflate}->($raw, $inner_self);
 
                 # Handle potential double-inflation edge cases
-                if (!ref($inflated) && defined($inflated) && $inflated =~ /^mailto:mailto:/) {
+                if (!ref($inflated)
+                    && defined($inflated)
+                    && $inflated =~ /^mailto:mailto:/) {
                     $inner_self->{_inflated}{$method} = $raw;
                     return $raw;
                 }
@@ -826,7 +909,9 @@ sub AUTOLOAD {
             *{"${class}::$method"} = sub {
                 my ($current_row) = @_;
 
-                my $row_id = eval { $current_row->get_column('id') } // 'unknown';
+                my $row_id = eval {
+                    $current_row->get_column('id')
+                } // 'unknown';
 
                 # Check if the relationship data exists
                 if (exists $current_row->{_relationship_data}{$method}) {
@@ -859,8 +944,7 @@ sub AUTOLOAD {
         return $self->{_data}{$method};
     }
 
-    # ----------------------------------------------------------------------
-    # 4.5 THE HIJACK GUARD
+    # THE HIJACK GUARD
     # ----------------------------------------------------------------------
     # If we reached here, Async::Row doesn't recognize this as a DB column.
     # We check if a custom class further up the @ISA chain has this method.
@@ -899,6 +983,28 @@ sub DESTROY {
 =head1 INTERNAL METHODS
 
 These methods are for internal use and are documented for completeness.
+
+=cut
+
+sub _spawn_rs {
+    my ($self) = @_;
+
+    die "Cannot spawn ResultSet: missing _schema_instance or _source_name"
+        unless $self->{_schema_instance} && $self->{_source_name};
+
+    return DBIx::Class::Async::ResultSet->new(
+        schema_instance => $self->{_schema_instance}, # Match ResultSet's new()
+        async_db        => $self->{_async_db},
+        source_name     => $self->{_source_name},
+        cond            => $self->ident_condition,
+    );
+}
+
+sub _mark_clean {
+    my $self = shift;
+    $self->{_dirty} = {};
+    return $self;
+}
 
 =head2 _build_relationship_accessor
 
@@ -942,7 +1048,8 @@ sub _build_relationship_accessor {
             return $rel_rs->find({ $fk->{foreign} => $fk_value });
         };
 
-    } elsif ($rel_type eq 'multi') {
+    }
+    elsif ($rel_type eq 'multi') {
         # has_many relationship
         return sub {
             my $row = shift;
@@ -1214,6 +1321,7 @@ Returns information about the primary key(s) for this row.
 =item B<Returns>
 
 Hash reference with keys:
+
 - C<columns>: Array reference of primary key column names
 - C<count>: Number of primary key columns
 - C<is_composite>: Boolean indicating composite primary key
@@ -1293,5 +1401,28 @@ sub _is_internal {
 
     return $col =~ $INTERNAL_KEYS;
 }
+
+=head1 PERFORMANCE OPTIMISATIONS
+
+=over 4
+
+=item * Shadow Keys
+
+For performance, non-inflated columns are shadowed directly onto the object
+hash, allowing for fast access without method calls.
+
+=item * Inflation Map
+
+The object maintains an internal C<_inflation_map> to avoid repeated metadata
+lookups against the C<ResultSource>.
+
+=item * Warm-up
+
+The constructor pre-calculates metadata to ensure the first data access is
+as fast as subsequent ones.
+
+=back
+
+=cut
 
 1; # End of DBIx::Class::Async::Row
