@@ -30,7 +30,8 @@ WriteMakefile(
         'Types::Standard'     => 0,
         'Scalar::Util'        => 0,
         'DBIx::Class'         => 0,
-        'Path::Tiny'          => 0,
+        'DBIx::Class'         => '0.082841',
+        'DBIx::Class::InflateColumn::Serializer' => '0',
     },
     TEST_REQUIRES => {
         'DBI'                 => 0,
