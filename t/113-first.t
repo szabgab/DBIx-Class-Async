@@ -4,7 +4,6 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
@@ -12,7 +11,7 @@ use DBIx::Class::Async::Schema;
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -24,9 +23,7 @@ my $schema         = DBIx::Class::Async::Schema->connect(
 
 $schema->await($schema->deploy({ add_drop_table => 1 }));
 
-# Seed data
 my $dave = $schema->resultset('User')->create({ name => 'Dave', age => 50 })->get;
-# create_related also returns a future in your design, use ->get
 $dave->create_related('orders', { amount => 10, status => 'pending' })->get;
 $schema->resultset('User')->create({ name => 'Eve', age => 25 })->get;
 
@@ -39,7 +36,6 @@ subtest "Basic first()" => sub {
 
     isa_ok($user, 'TestSchema::Result::User');
     is($user->name, 'Dave', "First user in alpha order is Dave");
-    done_testing;
 };
 
 subtest "first_future() Alias" => sub {
@@ -62,7 +58,6 @@ subtest "first() with Prefetch" => sub {
     my $orders = $user->{_relationship_data}{orders};
     is(ref $orders, 'ARRAY', "Orders were prefetched into the first() result");
     is($orders->[0]{amount}, 10, "Prefetched data is correct");
-    done_testing;
 };
 
 subtest 'first() from buffered entries' => sub {
@@ -77,8 +72,8 @@ subtest 'first() from buffered entries' => sub {
     # FIX: Use $schema->wait instead of wait_for
     my $user = $schema->await($rs->first);
     is($user->name, 'Dave', "Retrieved from buffer correctly");
-    done_testing;
 };
 
 $schema->disconnect;
+
 done_testing;

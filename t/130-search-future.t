@@ -1,34 +1,40 @@
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
+
 use Test::More;
-use File::Temp qw(tempfile);
-use lib 't/lib';
-use TestSchema;
-use DBIx::Class::Async::Schema;
+use Test::Deep;
+use File::Temp;
+use Test::Exception;
+
 use IO::Async::Loop;
+use DBIx::Class::Async::Schema;
 
-BEGIN {
-    $SIG{__WARN__} = sub {};
-}
+use lib 't/lib';
 
-my $loop = IO::Async::Loop->new;
-my ($fh, $db_file) = tempfile(SUFFIX => '.db', UNLINK => 1);
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
+);
 
-my $dsn    = "dbi:SQLite:dbname=$db_file";
-my $schema = TestSchema->connect($dsn);
-$schema->deploy;
-$schema->resultset('User')->create({ name => 'Alice', email => 'a@test.com' });
-$schema->resultset('User')->create({ name => 'Bob',   email => 'b@test.com' });
+$schema->await($schema->deploy({ add_drop_table => 1 }));
 
-my $async_schema = DBIx::Class::Async::Schema->connect($dsn, {
-    schema_class => 'TestSchema',
-    async_loop   => $loop,
-    workers      => 2,
-});
+$schema->resultset('User')
+       ->create({ name => 'Alice', email => 'a@test.com' })
+       ->get;
+$schema->resultset('User')
+       ->create({ name => 'Bob',   email => 'b@test.com' })
+       ->get;
 
 subtest 'Verify search_future Alias' => sub {
-    my $rs = $async_schema->resultset('User');
+    my $rs = $schema->resultset('User');
 
     my $future = $rs->search_future({ name => 'Bob' });
     isa_ok($future, 'Future', 'Method returns a Future object');
@@ -48,8 +54,8 @@ subtest 'Verify search_future Alias' => sub {
         isa_ok($row, 'TestSchema::Result::User', 'Result is correctly inflated');
         is($row->name, 'Bob', 'Correct record retrieved');
     }
-
-    done_testing;
 };
+
+$schema->disconnect;
 
 done_testing;

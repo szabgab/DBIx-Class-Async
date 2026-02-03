@@ -1,22 +1,20 @@
-
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
+
 use Test::More;
-use File::Temp qw(tempfile);
+use File::Temp;
+
 use lib 't/lib';
+
 use TestSchema;
-use DBIx::Class::Async::Schema;
 use IO::Async::Loop;
+use DBIx::Class::Async::Schema;
 
-BEGIN {
-    $SIG{__WARN__} = sub {};
-}
-
-# 1. Setup shared environment
-my $loop = IO::Async::Loop->new;
-my ($fh, $db_file) = tempfile(SUFFIX => '.db', UNLINK => 1);
-my $dsn = "dbi:SQLite:dbname=$db_file";
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
+my $dsn            = "dbi:SQLite:dbname=$db_file";
 
 # Deploy schema
 my $base_schema = TestSchema->connect($dsn);
@@ -39,7 +37,7 @@ subtest 'Storage Alignment' => sub {
     # 2. Verify that the storage itself is a new instance
     isnt($clone->storage, $schema->storage, 'Clone has its own storage instance');
 
-    done_testing();
+    #done_testing;
 };
 
 subtest 'Basic Cloning Integrity' => sub {
@@ -75,7 +73,7 @@ subtest 'Functional Independence' => sub {
         is($results[0]->name, 'Original', 'Data retrieved via clone is correct');
     }
 
-    done_testing(); # End the subtest properly
+    #done_testing;
 };
 
 subtest 'Storage Alignment' => sub {
@@ -85,4 +83,6 @@ subtest 'Storage Alignment' => sub {
     isnt($clone->storage, $schema->storage, 'Clone has its own storage instance');
 };
 
-done_testing();
+$schema->disconnect;
+
+done_testing;

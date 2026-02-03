@@ -1,30 +1,31 @@
-
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
+
 use Test::More;
+use File::Temp;
+
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
-use File::Temp qw(tempfile);
+
 use lib 't/lib';
-use TestSchema;
 
-BEGIN {
-    $SIG{__WARN__} = sub {};
-}
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
+);
 
-my $loop = IO::Async::Loop->new;
-my (undef, $db_file) = tempfile(SUFFIX => '.db', UNLINK => 1);
-my $async_schema = DBIx::Class::Async::Schema->connect("dbi:SQLite:dbname=$db_file", {
-    schema_class => 'TestSchema',
-    async_loop   => $loop,
-});
-
-$loop->await($async_schema->deploy);
+$schema->await($schema->deploy({ add_drop_table => 1 }));
 
 subtest 'Dependent Cross-Table Transaction' => sub {
-    # We want to create a User, and then an Order for that User ID
-    my $txn_f = $async_schema->txn_do([
+    my $txn_f = $schema->txn_do([
         {
             name      => 'new_user',
             action    => 'create',
@@ -35,23 +36,21 @@ subtest 'Dependent Cross-Table Transaction' => sub {
             action    => 'create',
             resultset => 'Order',
             data      => {
-                user_id => '$new_user.id', # Worker will resolve this!
+                user_id => '$new_user.id',
                 amount  => 150.00
             }
         }
     ]);
 
-    my $inner_f = $loop->await($txn_f);
-    my $res = $inner_f->get;
+    my $inner_f = $schema->await($txn_f);
+    my $res     = $inner_f;
 
     ok($res->{success}, "Transaction completed");
 
-    # Final Verification: Does the order actually point to the user?
-    my $search_f = $async_schema->resultset('Order')->search_future({});
-    my $orders = ($loop->await($search_f))->get;
-
-    my $user_search_f = $async_schema->resultset('User')->search_future({ name => 'Alice' });
-    my $users = ($loop->await($user_search_f))->get;
+    my $search_f      = $schema->resultset('Order')->search_future({});
+    my $orders        = $schema->await($search_f);
+    my $user_search_f = $schema->resultset('User')->search_future({ name => 'Alice' });
+    my $users         = $schema->await($user_search_f);
 
     is($orders->[0]{user_id}, $users->[0]{id}, "Order linked to correct User ID via register");
 };
@@ -59,7 +58,7 @@ subtest 'Dependent Cross-Table Transaction' => sub {
 subtest 'Raw SQL String Interpolation' => sub {
     # 1. Create a user to get an ID
     # 2. Use that ID inside a raw SQL update string
-    my $txn_f = $async_schema->txn_do([
+    my $txn_f = $schema->txn_do([
         {
             name      => 'target_user',
             action    => 'create',
@@ -73,19 +72,17 @@ subtest 'Raw SQL String Interpolation' => sub {
         }
     ]);
 
-    my $res = ($loop->await($txn_f))->get;
+    my $res = $schema->await($txn_f);
     ok($res->{success}, "Transaction with Raw SQL interpolation succeeded");
 
-    # Verify the update actually worked
-    my $search_f = $async_schema->resultset('User')->search_future({ email => 'raw@test.com' });
-    my $users = ($loop->await($search_f))->get;
-
-    my $user_id = $users->[0]{id};
+    my $search_f      = $schema->resultset('User')->search_future({ email => 'raw@test.com' });
+    my $users         = $schema->await($search_f);
+    my $user_id       = $users->[0]{id};
     my $expected_name = "Modified for ID $user_id";
 
     is($users->[0]{name}, $expected_name, "Raw SQL string was interpolated correctly with the real ID");
-
-    done_testing();
 };
 
-done_testing();
+$schema->disconnect;
+
+done_testing;

@@ -4,16 +4,15 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
+
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -72,5 +71,7 @@ subtest 'ResultSet update_or_new logic' => sub {
     is($updated_row->name, 'Changed', 'Update triggered on found row');
     is($updated_row->in_storage, 1, 'Updated row is in storage');
 };
+
+$schema->disconnect;
 
 done_testing;

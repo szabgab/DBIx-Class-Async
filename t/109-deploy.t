@@ -1,36 +1,33 @@
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
+
 use Try::Tiny;
+use File::Temp;
 use Test::More;
+
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
-use File::Temp qw(tempfile);
+
 use lib 't/lib';
+
 use TestSchema;
 
-BEGIN {
-    $SIG{__WARN__} = sub {};
-}
-
-my $loop = IO::Async::Loop->new;
-
-my ($fh, $db_filename) = tempfile(SUFFIX => '.db', UNLINK => 1);
-close($fh);
-
-my $dsn = "dbi:SQLite:dbname=$db_filename";
-
-my $async_schema = DBIx::Class::Async::Schema->connect($dsn, {
+my $loop               = IO::Async::Loop->new;
+my ($fh, $db_filename) = File::Temp::tempfile(UNLINK => 1);
+my $dsn                = "dbi:SQLite:dbname=$db_filename";
+my $schema             = DBIx::Class::Async::Schema->connect($dsn, {
     schema_class => 'TestSchema',
     async_loop   => $loop,
     workers      => 1,
 });
 
 subtest "Async Deployment with Temp File" => sub {
-    my $rs = $async_schema->resultset('User');
-
-    my $f = $rs->all;
+    my $rs = $schema->resultset('User');
+    my $f  = $rs->all;
     my $sql_error = 'NONE';
+
     my $res;
     try {
         $res = $loop->await($f);
@@ -43,7 +40,8 @@ subtest "Async Deployment with Temp File" => sub {
                 my @values = $res->get;
             }
         }
-    } catch {
+    }
+    catch {
         $sql_error = $_;
     };
 
@@ -54,7 +52,7 @@ subtest "Async Deployment with Temp File" => sub {
     # 2. PERFORM DEPLOYMENT
     my $deploy_res;
     try {
-        $deploy_res = $loop->await($async_schema->deploy);
+        $deploy_res = $loop->await($schema->deploy);
 
         # Handle nested Future for deploy
         if (Scalar::Util::blessed($deploy_res) && $deploy_res->can('get')) {
@@ -62,7 +60,8 @@ subtest "Async Deployment with Temp File" => sub {
                 $deploy_res = ($deploy_res->get)[0];
             }
         }
-    } catch {
+    }
+    catch {
         fail("Deploy failed: $_");
     };
 
@@ -79,15 +78,15 @@ subtest "Async Deployment with Temp File" => sub {
                 $after_res = ($after_res->get)[0];
             }
         }
-    } catch {
+    }
+    catch {
         fail("Query failed: $_");
     };
 
     is(ref($after_res), 'ARRAY', "Search results is an ARRAY reference");
     is(scalar @$after_res, 0, "Database table exists and is empty");
-
-    done_testing();
 };
 
+$schema->disconnect;
 
 done_testing;

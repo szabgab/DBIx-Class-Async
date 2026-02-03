@@ -4,7 +4,6 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
 use Test::Exception;
 use IO::Async::Loop;
@@ -13,7 +12,7 @@ use DBIx::Class::Async::Schema;
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -25,7 +24,6 @@ my $schema         = DBIx::Class::Async::Schema->connect(
 
 $schema->await($schema->deploy({ add_drop_table => 1 }));
 
-# Populate 9 users (1..9)
 my @users;
 for my $i (1..9) {
     push @users,
@@ -119,4 +117,5 @@ subtest 'slice - comparison with rows/offset' => sub {
 };
 
 $schema->disconnect;
+
 done_testing;

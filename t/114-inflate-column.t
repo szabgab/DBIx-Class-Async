@@ -13,7 +13,7 @@ use lib 't/lib';
 
 my $json           = JSON::MaybeXS->new->utf8->canonical;
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -23,13 +23,8 @@ my $schema         = DBIx::Class::Async::Schema->connect(
     },
 );
 
-# Deploy the schema
-$schema->{_native_schema}->deploy;
+$schema->await($schema->deploy({ add_drop_table => 1 }));
 
-# Ensure workers are synced and the DB file is ready
-$schema->sync_metadata->get;
-
-# Insert initial data via the native schema
 $schema->{_native_schema}->resultset('Product')->create({
     name     => 'Gaming Mouse',
     sku      => 'MOUSE-99',
@@ -37,10 +32,8 @@ $schema->{_native_schema}->resultset('Product')->create({
     metadata => '{"color":"rgb","dpi":16000}'
 });
 
-# Ensure workers are alive
 $schema->resultset('Product')->count->get;
 
-# Register inflation via the proxy
 $schema->inflate_column('Product', 'metadata', {
     inflate => sub {
         my $value = shift;
@@ -54,7 +47,6 @@ $schema->inflate_column('Product', 'metadata', {
     },
 });
 
-# Find and modify via async
 $schema->resultset('Product')
        ->find({ sku => 'MOUSE-99' })
        ->then(sub {
@@ -72,11 +64,12 @@ $schema->resultset('Product')
        })->get;
 
 
-# Check raw value in the file
 my $raw_value = $schema->{_native_schema}->storage->dbh->selectrow_array(
     "SELECT metadata FROM products WHERE sku = 'MOUSE-99'"
 );
 
 is($raw_value, '{"color":"rgb","dpi":25000}', 'Round-trip successful through worker processes');
+
+$schema->disconnect;
 
 done_testing;

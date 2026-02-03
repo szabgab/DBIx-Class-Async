@@ -2,34 +2,29 @@
 
 use strict;
 use warnings;
-use utf8;
 
 use Test::More;
 use Test::Exception;
+
+use lib "t/lib";
+
 use File::Temp;
-
-use FindBin qw($Bin);
-use lib "$Bin/../lib";
-use lib "$Bin/lib";
-
-use DBIx::Class::Async::Schema;
 use TestSchema;
+use DBIx::Class::Async::Schema;
 
-# Setup Database
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
-
-# Initialise a global async Schema
-my $schema = DBIx::Class::Async::Schema->connect(
-    "dbi:SQLite:dbname=$db_file",
-    undef, undef, {},
-    { workers => 2, schema_class => 'TestSchema' }
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
 );
 
-# 3. Deploy
-my $loop = $schema->{_async_db}->{_loop};
-$loop->await($schema->deploy);
+$schema->await($schema->deploy({ add_drop_table => 1 }));
 
-# Test 1: Basic schema connection
 subtest 'Basic schema connection' => sub {
     isa_ok($schema, 'DBIx::Class::Async::Schema');
 
@@ -39,7 +34,6 @@ subtest 'Basic schema connection' => sub {
     ok(grep(/^Order$/, @sources), 'Has Order source');
 };
 
-# Test 2: Simple user CRUD
 subtest 'Simple user CRUD' => sub {
     my $user_rs = $schema->resultset('User');
     isa_ok($user_rs, 'DBIx::Class::Async::ResultSet');
@@ -69,7 +63,6 @@ subtest 'Simple user CRUD' => sub {
     is($updated->active, 0,              'Update attribute correct');
 };
 
-# Test 3: Order operations
 subtest 'Order operations' => sub {
     my $user_rs  = $schema->resultset('User');
     my $order_rs = $schema->resultset('Order');
@@ -102,7 +95,6 @@ subtest 'Order operations' => sub {
     is($user_orders->[0]->id, $order->id, 'Relationship has_many works');
 };
 
-# Test 4: Search and count
 subtest 'Search and count' => sub {
     my $user_rs = $schema->resultset('User');
 
@@ -127,7 +119,6 @@ subtest 'Search and count' => sub {
     cmp_ok($active_count, '>=', 1, 'Search count works');
 };
 
-# Final Disconnect
 $schema->disconnect;
 
 done_testing;

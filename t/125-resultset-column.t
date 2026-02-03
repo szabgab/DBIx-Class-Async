@@ -4,16 +4,15 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
+
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -26,9 +25,9 @@ my $schema         = DBIx::Class::Async::Schema->connect(
 $schema->await($schema->deploy({ add_drop_table => 1 }));
 
 $schema->resultset('User')->populate([
-    [qw/ name age /],
-    [ 'Alice', 30 ],
-    [ 'Bob',   40 ],
+    [qw/ name age / ],
+    [ 'Alice', 30   ],
+    [ 'Bob',   40   ],
     [ 'Charlie', 20 ],
 ])->get;
 
@@ -37,18 +36,15 @@ my $rs = $schema->resultset('User');
 subtest 'Testing ResultSetColumn Aggregates' => sub {
     my $initial_queries = $rs->stats('queries');
 
-    # 1. Get the column proxy (Synchronous call, should NOT increment counter)
     my $age_col = $rs->get_column('age');
     isa_ok($age_col, 'DBIx::Class::Async::ResultSetColumn', "get_column returned the proxy");
     is($rs->stats('queries'), $initial_queries, "Counter did not increment yet");
 
-    # 2. Test MAX aggregate
-    note "Executing MAX(age)...";
     my $max_val;
     my $f_max = $age_col->max;
 
     $f_max->on_done(sub {
-        my $val = shift;
+        my $val  = shift;
         $max_val = $val;
         $loop->stop;
     });
@@ -58,8 +54,6 @@ subtest 'Testing ResultSetColumn Aggregates' => sub {
     ok(defined $max_val, "Retrieved a maximum age: $max_val");
     is($rs->stats('queries'), $initial_queries + 1, "Counter incremented for MAX query");
 
-    # 3. Test SUM aggregate
-    note "Executing SUM(age)...";
     my $sum_val;
     my $f_sum = $age_col->sum;
 
@@ -69,10 +63,8 @@ subtest 'Testing ResultSetColumn Aggregates' => sub {
     ok(defined $sum_val, "Retrieved a sum of ages: $sum_val");
     is($rs->stats('queries'), $initial_queries + 2, "Counter incremented for SUM query");
 
-    # 4. Test a filtered aggregate (Ensures payload/WHERE clause is preserved)
-    # Re-use your search logic
     my $filtered_rs = $rs->search({ name => { '!=', undef } });
-    my $f_filtered = $filtered_rs->get_column('age')->min;
+    my $f_filtered  = $filtered_rs->get_column('age')->min;
 
     my $min_val;
     $f_filtered->on_done(sub { $min_val = shift; $loop->stop; });
@@ -92,9 +84,8 @@ subtest 'Testing Average Aggregate' => sub {
         if ($f->is_done) {
             $avg_val = $f->result;
         } else {
-            $error = $f->failure;
+            $error   = $f->failure;
         }
-        # ALWAYS stop the loop once the future is ready
         $loop->stop;
     });
 
@@ -103,7 +94,6 @@ subtest 'Testing Average Aggregate' => sub {
     if ($error) {
         fail("Average query failed: $error");
     } else {
-        # SQLite might return 30 or 30.0
         cmp_ok($avg_val, '==', 30, "Retrieved the correct average age (30)");
     }
 };
@@ -115,9 +105,9 @@ subtest 'Testing Column Count' => sub {
     $f->on_ready(sub {
         my $future = shift;
         if ($future->is_done) {
-            $val = $future->result;
+            $val   = $future->result;
         } else {
-            $val = undef;
+            $val   = undef;
         }
         $loop->stop;
     });
@@ -125,5 +115,7 @@ subtest 'Testing Column Count' => sub {
     $loop->run;
     is($val, 3, "Column count works");
 };
+
+$schema->disconnect;
 
 done_testing;

@@ -4,16 +4,15 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
+
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -25,12 +24,18 @@ my $schema         = DBIx::Class::Async::Schema->connect(
 
 $schema->await($schema->deploy({ add_drop_table => 1 }));
 
-$schema->resultset('User')->create({ name => 'Alice', age => 30 })->get;
-my $bob = $schema->resultset('User')->create({ name => 'Bob', age => 40 })->get;
-$bob->create_related('orders', { amount => 99.99, status => 'shipped' })->get;
+$schema->resultset('User')
+       ->create({ name => 'Alice', age => 30 })
+       ->get;
+
+my $bob = $schema->resultset('User')
+                 ->create({ name => 'Bob', age => 40 })
+                 ->get;
+
+$bob->create_related('orders', { amount => 99.99, status => 'shipped' })
+    ->get;
 
 subtest 'Basic single()' => sub {
-    # single() usually implies we expect exactly one result
     my $rs = $schema->resultset('User')->search({ name => 'Bob' });
     my $user = $schema->await($rs->single);
 
@@ -64,7 +69,6 @@ subtest 'single() returns undef on no match' => sub {
 subtest 'single() utilizes existing buffer' => sub {
     my $rs = $schema->resultset('User')->search({});
 
-    # Load all users into memory first
     $schema->await($rs->all);
     ok($rs->{_rows}, "Buffer is populated");
 
@@ -73,5 +77,7 @@ subtest 'single() utilizes existing buffer' => sub {
     my $user = $schema->await($rs->single);
     is($user->name, 'Alice', "single() pulled from buffer correctly");
 };
+
+$schema->disconnect;
 
 done_testing;

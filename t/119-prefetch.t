@@ -4,16 +4,14 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -49,25 +47,21 @@ subtest 'Bulk Populate (HashRefs)' => sub {
     my $res = $schema->await($f);
     ok($res, "populate_bulk returns truthy success (1)");
 
-    # Verify count
     my $count_f = $rs->count;
     is($schema->await($count_f), 4, "Total count is now 4");
 };
 
 subtest 'Prefetch Proxy Logic' => sub {
-    # Testing the proxy construction (non-blocking)
     my $rs = $schema->resultset('User');
     my $prefetched_rs = $rs->prefetch('posts');
 
     isa_ok($prefetched_rs, 'DBIx::Class::Async::ResultSet', "prefetch() returns a new RS proxy");
     is($prefetched_rs->{_attrs}->{prefetch}, 'posts', "Prefetch attribute correctly stored in proxy");
 
-    # Ensure the original RS was not modified (immutability)
     ok(!exists $rs->{_attrs}->{prefetch}, "Original ResultSet remains clean");
 };
 
 subtest 'Execution with Prefetch' => sub {
-    # 1. Setup Data using a standard connection
     my $dsn = "dbi:SQLite:dbname=$db_file";
     my $native_schema = TestSchema->connect($dsn);
     my $dave = $native_schema->resultset('User')->find({ name => 'Dave' });
@@ -77,7 +71,6 @@ subtest 'Execution with Prefetch' => sub {
         status => 'shipped'
     });
 
-    # 2. Test the Async prefetch
     my $f = $schema->resultset('User')
                    ->search({ 'me.name' => 'Dave' })
                    ->prefetch('orders')
@@ -85,13 +78,13 @@ subtest 'Execution with Prefetch' => sub {
 
     my $user = $schema->await($f);
 
-    # 3. Assertions
     is($user->name, 'Dave', "Found Dave object");
 
-    # Access prefetched data (now using 'status' instead of 'order_number')
     my $orders = $user->{_relationship_data}{orders};
     is(ref $orders, 'ARRAY', "Orders were prefetched");
     is($orders->[0]{status}, 'shipped', "Order status is correct");
 };
+
+$schema->disconnect;
 
 done_testing;

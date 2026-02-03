@@ -4,16 +4,14 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -63,25 +61,22 @@ subtest 'search_related (List Context)' => sub {
     }
 };
 
-#subtest 'search_related (List Context)' => sub {
-    # Force scalar to get the Future object
-#    my $f = scalar $user_rs->search_related('orders');
+subtest 'search_related (List Context)' => sub {
+    my $f = scalar $user_rs->search_related('orders');
 
-    # Use 'can' to verify it's a Future-compliant object
-    # (handles IO::Async::Future or standard Future)
- #   ok($f && $f->can('get'), 'Method returns a resolvable Future');
+    ok($f && $f->can('get'), 'Method returns a resolvable Future');
 
-  #  my $results = $f->get;
+    my $results = $f->get;
 
     # Ensure we are dealing with an arrayref
-   # my @orders = (ref $results eq 'ARRAY') ? @$results : ($results);
+    my @orders = (ref $results eq 'ARRAY') ? @$results : ($results);
 
-    #is(scalar @orders, 3, 'Found all 3 related orders');
+    is(scalar @orders, 3, 'Found all 3 related orders');
 
-#    if (@orders) {
- #       is($orders[0]->get_column('amount'), 10, 'Data is correct');
-  #  }
-#};
+    if (@orders) {
+        is($orders[0]->get_column('amount'), 10, 'Data is correct');
+    }
+};
 
 $schema->disconnect;
 

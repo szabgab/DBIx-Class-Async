@@ -4,16 +4,15 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
+
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -44,10 +43,8 @@ my $rs = $schema->resultset('User')
 is(ref($rs), 'DBIx::Class::Async::ResultSet', 'Still an Async ResultSet after chaining');
 is_deeply($rs->{_cond}, { -and => [ { active => 1 }, { name => 'Alice' } ] }, 'Conditions merged correctly');
 
-# 3. Test Execution via Worker
 my $future = $rs->all();
 
-# Wait for the worker to finish
 $schema->await($future);
 my $results = $future->get;
 

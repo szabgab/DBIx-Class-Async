@@ -1,55 +1,43 @@
-
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
-use Test::More;
-use File::Temp qw(tempfile);
-use Future;
-use lib 'lib', 't/lib';
 
+use Test::More;
+use Test::Deep;
+use File::Temp;
+use Test::Exception;
+
+use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
-BEGIN {
-    $SIG{__WARN__} = sub {};
-}
+use lib 't/lib';
 
-# Helper to resolve Futures
-sub wait_for {
-    my $future = shift;
-    return $future->get if ref($future) && $future->can('get');
-    return $future;
-}
-
-# 1. Setup Physical Database
-my ($fh, $filename) = tempfile(SUFFIX => '.db', UNLINK => 1);
-my $dsn = "dbi:SQLite:dbname=$filename";
-
-use TestSchema;
-my $native_schema = TestSchema->connect($dsn);
-$native_schema->deploy();
-
-# 2. Seed Data (5 Orders)
-# We need enough data to span multiple pages
-my $u1 = $native_schema->resultset('User')->create({ name => 'Alice', age => 30 });
-for my $i (1..5) {
-    $u1->create_related('orders', {
-        amount => $i * 10,
-        status => ($i <= 3 ? 'pending' : 'shipped')
-    });
-}
-
-# 3. Initialize Async Schema
-my $async_schema = DBIx::Class::Async::Schema->connect(
-    $dsn,
-    {
-        schema_class => 'TestSchema',
-        workers      => 2 # Important for parallel execution!
-    }
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
 );
 
-## Subtest: Basic Pagination Metadata
+$schema->await($schema->deploy({ add_drop_table => 1 }));
+
+my $user = $schema->resultset('User')
+                  ->create({ name => 'Alice', age => 30 })
+                  ->get;
+for my $i (1..5) {
+    $user->create_related('orders', {
+        amount => $i * 10,
+        status => ($i <= 3 ? 'pending' : 'shipped')
+    })->get
+}
+
 subtest 'search_with_pager metadata initialization' => sub {
-    my $rs = $async_schema->resultset('Order');
+    my $rs = $schema->resultset('Order');
 
     # We want pending orders, 2 per page
     my $paged_rs = $rs->search({ status => 'pending' }, { rows => 2, page => 1 });
@@ -63,45 +51,36 @@ subtest 'search_with_pager metadata initialization' => sub {
     is($pager->entries_per_page, 2, "Pager inherited rows limit");
 };
 
-## Subtest: End-to-End Async Paging
 subtest 'search_with_pager execution' => sub {
-    my $rs = $async_schema->resultset('Order');
-
-    # Fire the combined request
-    # This fires TWO worker tasks: one for SELECT, one for SELECT COUNT
+    my $rs     = $schema->resultset('Order');
     my $future = $rs->search_with_pager(
-        { status => 'pending' },
-        { rows => 2, page => 1, order_by => 'amount' }
+        { status   => 'pending' },
+        { rows     => 2,
+          page     => 1,
+          order_by => 'amount' }
     );
 
-    # wait_for should return the list provided by Future->done($rows, $pager)
-    my ($rows, $pager) = wait_for($future);
+    my ($rows, $pager) = $schema->await($future);
 
-    # 1. Check Data
     is(scalar @$rows, 2, "Found 2 rows for page 1");
     is($rows->[0]->amount, 10, "First row is correct (amount 10)");
 
-    # 2. Check Pager (This verifies the parallel count query worked)
-    # total_entries was resolved via $rs->count in the background
-    my $total = wait_for($pager->total_entries);
+    my $total = $schema->await($pager->total_entries);
     is($total, 3, "Total entries correctly reported as 3");
     is($pager->last_page, 2, "Correctly calculated that there are 2 pages total");
     ok($pager->has_next, "Pager knows there is a second page");
 };
 
-## Subtest: Paging with Relationships
 subtest 'search_with_pager with related pivot' => sub {
-    # Combine related_resultset + search_with_pager
-    # Get orders for Alice (age 30), paged.
-    my $future = $async_schema->resultset('User')
-        ->search({ age => 30 })
-        ->related_resultset('orders')
-        ->search_with_pager({}, { rows => 1 });
+    my $future = $schema->resultset('User')
+                        ->search({ age => 30 })
+                        ->related_resultset('orders')
+                        ->search_with_pager({}, { rows => 1 });
 
-    my ($rows, $pager) = wait_for($future);
+    my ($rows, $pager) = $schema->await($future);
 
     is(scalar @$rows, 1, "Pivoted and paged data successfully");
-    is(wait_for($pager->total_entries), 5, "Total count correctly identified 5 orders for Alice");
+    is($schema->await($pager->total_entries), 5, "Total count correctly identified 5 orders for Alice");
 };
 
-done_testing();
+done_testing;

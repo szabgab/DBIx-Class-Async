@@ -4,18 +4,17 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
 
 use lib 't/lib';
+
 use TestSchema;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -46,9 +45,6 @@ my $result = $schema->txn_batch([
 
 $schema->await($result);
 
-
-
-# Test 1: Full workflow
 subtest 'Complete workflow' => sub {
 
     # 1. Search with pagination - returns hashrefs, not Row objects
@@ -134,7 +130,6 @@ subtest 'Complete workflow' => sub {
         ->get;
 };
 
-# Test 2: Async behavior
 subtest 'Async behavior' => sub {
 
     my @futures = (

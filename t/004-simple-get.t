@@ -9,13 +9,11 @@ use Test::Exception;
 
 use lib "t/lib";
 
-use DBI;
 use TestSchema;
 use IO::Async::Loop;
-use DBIx::Class::Async;
 use DBIx::Class::Async::Schema;
 
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile( UNLINK => 1);
 my $schema_class   = 'TestSchema';
 my $loop           = IO::Async::Loop->new;
 

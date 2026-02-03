@@ -102,6 +102,7 @@ t/141-unregister-source.t
 t/142-update-or-create.t
 t/143-update-or-new.t
 t/144-update.t
+t/benchmark.pl
 t/manifest.t
 t/pod.t
 t/lib/TestSchema.pm

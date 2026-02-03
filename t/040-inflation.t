@@ -4,10 +4,10 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
-use File::Temp qw(tempfile);
-use JSON::MaybeXS;
+use File::Temp;
+
 use DateTime;
+use JSON::MaybeXS;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
@@ -15,7 +15,7 @@ use lib 't/lib';
 
 my $json           = JSON::MaybeXS->new(utf8 => 1, sort_by => 1);
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,

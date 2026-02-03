@@ -11,7 +11,7 @@ use DBIx::Class::Async::Schema;
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -56,8 +56,6 @@ subtest 'Pager: Boundary Conditions' => sub {
     is($pager->entries_on_this_page, 5, 'Last page (3) has exactly 5 entries');
     is($pager->next_page, undef, 'No next page after page 3');
     is($pager->previous_page, 2, 'Previous page is 2');
-
-    done_testing;
 };
 
 subtest 'Pager: ResultSet Chaining' => sub {

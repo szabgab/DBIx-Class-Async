@@ -4,16 +4,15 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
+
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -25,7 +24,6 @@ my $schema         = DBIx::Class::Async::Schema->connect(
 
 $schema->await($schema->deploy({ add_drop_table => 1 }));
 
-# Create user
 my $user = $schema->resultset('User')->create({
     id     => 1,
     name   => 'BottomUp User',
@@ -33,7 +31,6 @@ my $user = $schema->resultset('User')->create({
     active => 1,
 })->get;
 
-# Create some orders for the user
 $schema->resultset('Order')->create({
     user_id => 1,
     status  => 'pending',
@@ -48,9 +45,8 @@ $schema->resultset('Order')->create({
 
 subtest 'Relationship Pivoting (search_related)' => sub {
     my $user_future = $schema->resultset('User')->find(1);
-    my $user = $user_future->get;
-
-    my $orders_rs = eval { $user->search_related_rs('orders') };
+    my $user        = $user_future->get;
+    my $orders_rs   = eval { $user->search_related_rs('orders') };
 
     if ($@) {
         fail("search_related_rs failed: $@");
@@ -82,5 +78,7 @@ subtest 'Chained search_related' => sub {
     is(scalar @$recent_orders, 1, "Found 1 pending order");
     is($recent_orders->[0]->status, 'pending', "Order status is pending");
 };
+
+$schema->disconnect;
 
 done_testing;

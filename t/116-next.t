@@ -11,7 +11,7 @@ use DBIx::Class::Async::Schema;
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -33,7 +33,6 @@ subtest 'Naked next() - Lazy Loading' => sub {
     my $rs = $schema->resultset('User')->search({ id => 1 });
     $rs->{_async_db}{_stats}{_queries} = 0;
 
-    # We NEVER call $rs->all here. We go straight to next().
     my $row = $rs->next->get;
 
     ok($row, 'next() triggered a fetch on its own');

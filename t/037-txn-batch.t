@@ -4,9 +4,7 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
-use Test::Exception;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
@@ -17,7 +15,7 @@ my $email_count = 0;
 sub next_email { "test_" . ++$email_count . "\@example.com" }
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -29,7 +27,6 @@ my $schema         = DBIx::Class::Async::Schema->connect(
 
 $schema->await($schema->deploy({ add_drop_table => 1 }));
 
-# --- Top Level Batch Test ---
 my $top_email = next_email();
 my $user = $schema->resultset('User')
                    ->create({
@@ -63,8 +60,6 @@ is($updated->name, 'Updated Name', "Async db update persisted.");
 my $new_user = $schema->resultset('User')->find({ email => $batch_email })->get;
 is($new_user->name, 'New Batch User', "Async db create persisted.");
 
-
-# --- Subtest Batch Test ---
 subtest "Async schema txn_batch" => sub {
     my $sub_email = next_email();
     my $user = $schema->resultset('User')
@@ -101,4 +96,5 @@ subtest "Async schema txn_batch" => sub {
 };
 
 $schema->disconnect;
+
 done_testing;

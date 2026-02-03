@@ -13,6 +13,12 @@ DBIx::Class::Async - Non-blocking, multi-worker asynchronous wrapper for DBIx::C
 
 Version 0.50
 
+=head1 DISCLAIMER
+
+B<This is pure experimental currently.>
+
+You are encouraged to try and share your suggestions.
+
 =head1 QUICK START
 
 This example demonstrates how to set up a small C<SQLite> database and

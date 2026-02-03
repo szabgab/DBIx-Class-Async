@@ -4,7 +4,6 @@ use strict;
 use warnings;
 
 use Test::More;
-use Test::Deep;
 use File::Temp;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
@@ -12,7 +11,7 @@ use DBIx::Class::Async::Schema;
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -45,5 +44,7 @@ subtest 'Bulk Populate' => sub {
 
     ok($rows, "Bulk returns truthy success");
 };
+
+$schema->disconnect;
 
 done_testing;

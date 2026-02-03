@@ -11,7 +11,7 @@ use DBIx::Class::Async::Schema;
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -29,8 +29,7 @@ $schema->resultset('User')->create({ name => 'Charlie', active => 0 })->get;
 
 my $rs = $schema->resultset('User');
 
-# Standard Count
-{
+subtest 'Standard Count'=> sub {
     my $future = $rs->count({ active => 1 });
 
     my $count;
@@ -38,10 +37,9 @@ my $rs = $schema->resultset('User');
     $loop->run;
 
     is($count, 2, "Standard count returned 2 active users");
-}
+};
 
-# Count Literal
-{
+subtest 'Count Literal' => sub {
     # Literal SQL fragment for SQLite
     my $future = $rs->count_literal('name LIKE ?', 'A%');
 
@@ -50,16 +48,15 @@ my $rs = $schema->resultset('User');
     $loop->run;
 
     is($literal_count, 1, "count_literal found 1 user starting with 'A' (Alice)");
-}
+};
 
-# Scoreboard Integrity
-{
+subtest 'Scoreboard Integrity' => sub {
     # Use the new public method
     my $queries = $rs->stats('queries');
 
     # If you didn't reset, we expect 5 (3 setup + 2 test)
     is($queries, 5, "The public stats() method correctly reported 4 queries");
-}
+};
 
 subtest 'Testing count_rs and lazy stats' => sub {
     # Get current query count

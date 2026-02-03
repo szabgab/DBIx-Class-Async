@@ -2,33 +2,28 @@
 
 use strict;
 use warnings;
-use Test::More;
-use File::Temp qw(tempfile);
-use IO::Async::Loop;
-use Future;
-use Scalar::Util qw(blessed);
 
-use lib 'lib', 't/lib';
+use Test::More;
+use File::Temp;
+
+use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
-my $loop = IO::Async::Loop->new;
-my ($fh, $db_file) = tempfile(SUFFIX => '.db', UNLINK => 1);
-my $dsn = "dbi:SQLite:dbname=$db_file";
+use lib 't/lib';
 
-my $schema = DBIx::Class::Async::Schema->connect(
-    $dsn, undef, undef, {},
-    {
-        schema_class => 'TestSchema',
-        loop         => $loop,
-        workers      => 2,
-    }
+my $loop           = IO::Async::Loop->new;
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
+my $schema         = DBIx::Class::Async::Schema->connect(
+    "dbi:SQLite:dbname=$db_file", undef, undef, {},
+    { workers      => 2,
+      schema_class => 'TestSchema',
+      async_loop   => $loop,
+      cache_ttl    => 60,
+    },
 );
 
-# 3. Deploy and Seed
-$schema->await($schema->deploy);
+$schema->await($schema->deploy({ add_drop_table => 1 }));
 
-# Create a User with specific settings (testing the JSON inflator)
-# and multiple orders (testing prefetch)
 my $user = $schema->resultset('User')->create({
     name     => 'Async Developer',
     email    => 'dev@example.com',
@@ -43,7 +38,6 @@ $schema->await($user->create_related('orders', { amount => 42.99,  status => 'pe
 
 
 subtest 'Search with Prefetch and HashRefInflator' => sub {
-    # We want a User, their Orders, and we want it as a plain Hash
     my $future = $schema->search_with_prefetch(
         'User',
         { email => 'dev@example.com' },
@@ -74,7 +68,6 @@ subtest 'Search with Prefetch and HashRefInflator' => sub {
 };
 
 subtest 'Search with Prefetch (Object Mode)' => sub {
-    # Testing without HashRefInflator to ensure Row objects work
     my $future = $schema->search_with_prefetch(
         'User',
         { email => 'dev@example.com' },
@@ -84,7 +77,7 @@ subtest 'Search with Prefetch (Object Mode)' => sub {
     my $results = $schema->await($future);
     my $u = $results->[0];
 
-    ok(blessed($u), 'Result is a blessed Row object');
+    ok(Scalar::Util::blessed($u), 'Result is a blessed Row object');
     ok($u->can('orders'), 'Object has orders relationship method');
 
     my $orders_future = $u->orders->all;
@@ -92,4 +85,6 @@ subtest 'Search with Prefetch (Object Mode)' => sub {
     is(scalar @$orders, 2, 'Related objects are accessible');
 };
 
-done_testing();
+$schema->disconnect;
+
+done_testing;

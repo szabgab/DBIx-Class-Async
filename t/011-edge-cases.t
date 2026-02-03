@@ -11,7 +11,7 @@ use DBIx::Class::Async::Schema;
 use lib 't/lib';
 
 my $loop           = IO::Async::Loop->new;
-my ($fh, $db_file) = File::Temp::tempfile(SUFFIX => '.db', UNLINK => 1);
+my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
 my $schema         = DBIx::Class::Async::Schema->connect(
     "dbi:SQLite:dbname=$db_file", undef, undef, {},
     { workers      => 2,
@@ -30,7 +30,6 @@ my $user = $schema->resultset('User')
                     email => 'alice@example.com', })
                   ->get;
 
-# Test 1: Empty results
 subtest 'Empty results' => sub {
 
     my $rows = $schema->resultset('User')
@@ -63,7 +62,6 @@ subtest 'Empty results' => sub {
     is($delete, 0, 'Delete affects 0 rows');
 };
 
-# Test 2: Special characters and encoding
 subtest 'Encoding and special chars' => sub {
 
     my $new_name = "O'Connor & \"Special\" <Chars>";
@@ -85,7 +83,6 @@ subtest 'Encoding and special chars' => sub {
     $new_user->delete->get;
 };
 
-# Test 3: Large result sets
 subtest 'Large result sets' => sub {
 
     # Create many users
@@ -125,7 +122,6 @@ subtest 'Large result sets' => sub {
 
 };
 
-# Test 4: Concurrent modifications
 subtest 'Concurrent access' => sub {
 
     # Create user
@@ -173,7 +169,6 @@ subtest 'Concurrent access' => sub {
     $final_user->delete->get;
 };
 
-# Test 5: Error recovery
 subtest 'Error recovery' => sub {
     # 1. Invalid Table Name
     # We wrap the resultset call itself inside the block
