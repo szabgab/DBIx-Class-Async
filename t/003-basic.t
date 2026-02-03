@@ -4,12 +4,13 @@ use strict;
 use warnings;
 
 use Test::More;
+use File::Temp;
 use Test::Exception;
 
 use lib "t/lib";
 
-use File::Temp;
 use TestSchema;
+use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 my $loop           = IO::Async::Loop->new;

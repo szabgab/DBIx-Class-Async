@@ -9,6 +9,7 @@ use File::Temp;
 use lib 't/lib';
 
 use TestSchema;
+use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 my $loop           = IO::Async::Loop->new;

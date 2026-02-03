@@ -4,13 +4,14 @@ use strict;
 use warnings;
 
 use Test::More;
-#use Test::Deep;
 use File::Temp;
 use Test::Exception;
-use IO::Async::Loop;
-use DBIx::Class::Async::Schema;
 
 use lib 't/lib';
+
+use TestSchema;
+use IO::Async::Loop;
+use DBIx::Class::Async::Schema;
 
 my $loop           = IO::Async::Loop->new;
 my ($fh, $db_file) = File::Temp::tempfile(UNLINK => 1);
@@ -22,7 +23,6 @@ my $schema         = DBIx::Class::Async::Schema->connect(
       cache_ttl    => 60,
     },
 );
-
 
 $schema->deploy({ add_drop_table => 1 })->get;
 

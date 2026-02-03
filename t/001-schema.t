@@ -9,6 +9,7 @@ use Test::Deep;
 use Test::Exception;
 
 use lib 't/lib';
+use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 
 my $schema_class = "TestSchema";
