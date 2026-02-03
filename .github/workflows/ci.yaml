@@ -14,9 +14,10 @@ jobs:
       fail-fast: false
       matrix:
         perl-version:
-          - '5.8'
-          - '5.10'
-          - '5.12'
+          # The module itself requires perl 5.14
+          - '5.14'
+          - '5.16'
+          - '5.18'
           - '5.20'
           - '5.30'
           - '5.42'
@@ -27,9 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Show Perl version
+        run: perl -v
+
       - name: Prepare for release tests
         run: |
             cpanm --installdeps --notest --verbose .
+            cpanm --notest --verbose Test::CheckManifest
       - name: Release tests
         #env:
         #  RELEASE_TESTING: 1
@@ -37,3 +42,4 @@ jobs:
             perl Makefile.PL
             make
             PERL5LIB=$PERL5LIB:$(pwd)/lib:$(pwd)/t/lib make test
+
