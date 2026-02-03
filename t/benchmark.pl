@@ -7,6 +7,7 @@ use TestSchema;
 use IO::Async::Loop;
 use DBIx::Class::Async::Schema;
 use Time::HiRes qw(gettimeofday tv_interval);
+use Scalar::Util qw(blessed);
 
 print "DBIx::Class::Async Performance Benchmark (MySQL)\n\n";
 print "-" x 70 . "\n";
@@ -21,7 +22,8 @@ for my $count (50, 100, 200) {
     run_bench(
         "Standard DBIx::Class (Sequential/Blocking)", 0,
         $count, $raw_schema, $async_schema, $loop);
-    run_bench("DBIx::Class::Async (Parallel/Non-Blocking)", 1,
+    run_bench(
+        "DBIx::Class::Async (Parallel/Non-Blocking)", 1,
         $count, $raw_schema, $async_schema, $loop);
 }
 
@@ -83,10 +85,11 @@ sub run_bench {
     $loop->add($timer->start);
 
     my $t0 = [gettimeofday];
+    my $total_rows_verified = 0;
+    my $objects_inflated    = 0;
 
     my $heavy_search = sub {
         my $schema = shift;
-        # More complex query to emphasize network latency
         return $schema->resultset('User')->search(
             {
                 age    => { '>' => 30 },
@@ -107,15 +110,30 @@ sub run_bench {
             $heavy_search->($async_schema)->all
         } (1..$query_count);
 
-        $async_schema->await( Future->wait_all(@futures) );
+        # Process each future
+        for my $f (@futures) {
+            my $rows = $async_schema->await($f);
+
+            $total_rows_verified += scalar(@$rows);
+            if (@$rows && Scalar::Util::blessed($rows->[0])) {
+                $objects_inflated += scalar(@$rows);
+            }
+        }
     } else {
-        # Sequential execution
+        # Sequential execution WITH VERIFICATION
         for (1..$query_count) {
-            my @results = $heavy_search->($raw_schema)->all;
+            my @rows = $heavy_search->($raw_schema)->all;
+
+            # VERIFY PAYLOAD
+            $total_rows_verified += scalar(@rows);
+            if (@rows && Scalar::Util::blessed($rows[0])) {
+                $objects_inflated += scalar(@rows);
+            }
         }
     }
 
     my $elapsed = tv_interval($t0);
+    $elapsed = 0.0001 if $elapsed <= 0;
 
     $timer->stop;
     $loop->remove($timer);
@@ -128,28 +146,19 @@ sub run_bench {
 
     printf "Execution Time:     %.4f seconds\n", $elapsed;
     printf "Throughput:         %.2f queries/second\n", $throughput;
+    printf "Data Integrity:     %d rows verified (%d objects inflated)\n",
+           $total_rows_verified, $objects_inflated;
     printf "Event Loop Health:  %.1f%% responsive (%d/%d ticks)\n",
            $responsiveness, $ticks, $expected_ticks;
 
     if (!$is_async) {
         $baseline_time = $elapsed;
-        my $status = $ticks == 0
-                     ? "COMPLETELY BLOCKED"
-                     : "SEVERELY DEGRADED";
-
-        print "System Status:      $status\n";
+        print "System Status:      " . ($ticks == 0 ? "COMPLETELY BLOCKED" : "DEGRADED") . "\n";
         print "Performance:        [BASELINE]\n";
     } else {
         my $speedup = $baseline_time / $elapsed;
-        my $status = $responsiveness > 80
-                     ? "HEALTHY & NON-BLOCKING"
-                     : "BUSY";
-
-        print  "System Status:      $status\n";
+        print "System Status:      " . ($responsiveness > 80 ? "HEALTHY" : "BUSY") . "\n";
         printf "Performance:        %.2fx FASTER than baseline\n", $speedup;
-        printf "Time Saved:         %.4f seconds (%.1f%% improvement)\n",
-             ($baseline_time - $elapsed),
-            (($baseline_time - $elapsed) / $baseline_time * 100);
     }
 
     push @results, {
