@@ -214,34 +214,34 @@ sub print_summary {
 
     printf "Across all %d test runs:\n", scalar(@results) / 2;
     printf "\nPerformance Results:\n";
-    printf "  • Average Speedup:     %.2fx faster\n", $avg_speedup;
-    printf "  • Maximum Speedup:     %.2fx faster\n", $max_speedup;
-    printf "  • Total Time (Sync):   %.4f seconds\n", $total_sync_time;
-    printf "  • Total Time (Async):  %.4f seconds\n", $total_async_time;
-    printf "  • Time Saved:          %.4f seconds (%.1f%% improvement)\n",
+    printf "  - Average Speedup:     %.2fx faster\n", $avg_speedup;
+    printf "  - Maximum Speedup:     %.2fx faster\n", $max_speedup;
+    printf "  - Total Time (Sync):   %.4f seconds\n", $total_sync_time;
+    printf "  - Total Time (Async):  %.4f seconds\n", $total_async_time;
+    printf "  - Time Saved:          %.4f seconds (%.1f%% improvement)\n",
         $total_time_saved, $total_improvement;
 
     printf "\nEvent Loop Health:\n";
-    printf "  • Average Responsiveness: %.1f%%\n", $avg_responsiveness;
-    printf "  • Sequential Blocking:    0.0%% (completely blocked)\n";
+    printf "  - Average Responsiveness: %.1f%%\n", $avg_responsiveness;
+    printf "  - Sequential Blocking:    0.0%% (completely blocked)\n";
 
     print "\n What This Means:\n";
-    print "  • TRUE parallel query execution across network connections\n";
+    print "  - TRUE parallel query execution across network connections\n";
 
     if ($avg_speedup > 50) {
-        printf "  • Exceptional performance: %.0fx faster with worker pool\n", $avg_speedup;
-        print "  • Worker process caching and connection reuse is highly effective\n";
+        printf "  - Exceptional performance: %.0fx faster with worker pool\n", $avg_speedup;
+        print "  - Worker process caching and connection reuse is highly effective\n";
     }
     elsif ($avg_speedup > 2) {
-        printf "  • Strong performance: %.1fx faster with parallelism\n", $avg_speedup;
+        printf "  - Strong performance: %.1fx faster with parallelism\n", $avg_speedup;
     }
     else {
-        printf "  • Similar speed (%.1fx), but with %.1f%% event loop responsiveness\n",
+        printf "  - Similar speed (%.1fx), but with %.1f%% event loop responsiveness\n",
             $avg_speedup, $avg_responsiveness;
     }
 
-    print "  • Non-blocking event loop maintains application responsiveness\n";
-    print "  • Better scalability as query count increases\n";
+    print "  - Non-blocking event loop maintains application responsiveness\n";
+    print "  - Better scalability as query count increases\n";
 
     if ($max_speedup > 100) {
         print "\nKey Insight: Worker pool caching delivered exceptional results!\n";
