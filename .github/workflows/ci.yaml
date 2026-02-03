@@ -15,9 +15,9 @@ jobs:
       matrix:
         perl-version:
           # The module itself requires perl 5.14
-          #- '5.14' 
-          #- '5.16' # JSON is missing
-          #- '5.18' # JSON is missing
+          #- '5.14'
+          - '5.16' # JSON is missing
+          - '5.18' # JSON is missing
           - '5.20'
           - '5.22'
           - '5.24'
@@ -41,6 +41,7 @@ jobs:
         run: |
             cpanm --installdeps --notest --verbose .
             cpanm --notest --verbose Test::CheckManifest
+            cpanm --notest --verbose JSON # Needed by 5.16 and 5.18
       - name: Release tests
         #env:
         #  RELEASE_TESTING: 1
