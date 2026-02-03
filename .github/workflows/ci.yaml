@@ -27,7 +27,7 @@ jobs:
 
       - name: Prepare for release tests
         run: |
-            cpanm --installdep --notest .
+            cpanm --installdeps --notest .
             #cpanm --notest Test::CheckManifest Test::Pod::Coverage Pod::Coverage Test::Pod
       - name: Release tests
         #env:
