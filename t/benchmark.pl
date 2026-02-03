@@ -12,17 +12,20 @@ print "DBIx::Class::Async Performance Benchmark (MySQL)\n\n";
 print "-" x 70 . "\n";
 
 my $loop = IO::Async::Loop->new;
-my ($raw_schema, $async_schema) = setup_environment();
+my ($raw_schema, $async_schema) = setup_environment($loop);
 
 my (@results, $baseline_time);
 
 for my $count (50, 100, 200) {
     print "\n" . "Testing with $count queries...\n";
-    run_bench("Standard DBIx::Class (Sequential/Blocking)", 0, $count);
-    run_bench("DBIx::Class::Async (Parallel/Non-Blocking)", 1, $count);
+    run_bench(
+        "Standard DBIx::Class (Sequential/Blocking)", 0,
+        $count, $raw_schema, $async_schema, $loop);
+    run_bench("DBIx::Class::Async (Parallel/Non-Blocking)", 1,
+        $count, $raw_schema, $async_schema, $loop);
 }
 
-print_summary();
+print_summary(@results);
 
 $async_schema->disconnect;
 
@@ -31,6 +34,8 @@ $async_schema->disconnect;
 # METHODS
 
 sub setup_environment {
+    my $loop = shift;
+
     print "Setting up MySQL database with 10,000 records...\n\n";
 
     my $dsn      = "dbi:mysql:database=testdb";
@@ -62,7 +67,7 @@ sub setup_environment {
 }
 
 sub run_bench {
-    my ($name, $is_async, $query_count) = @_;
+    my ($name, $is_async, $query_count, $raw_schema, $async_schema, $loop) = @_;
 
     print "\n" . "-" x 70 . "\n";
     print "$name\n";
@@ -159,6 +164,8 @@ sub run_bench {
 }
 
 sub print_summary {
+    my @results = @_;
+
     print "\n" . "-" x 70 . "\n";
     print "SUMMARY\n";
     print "-" x 70 . "\n";

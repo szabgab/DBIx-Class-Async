@@ -1,5 +1,8 @@
 package DBIx::Class::Async::Schema;
 
+$DBIx::Class::Async::Schema::VERSION   = '0.51';
+$DBIx::Class::Async::Schema::AUTHORITY = 'cpan:MANWAR';
+
 =encoding utf8
 
 =head1 NAME
@@ -8,7 +11,7 @@ DBIx::Class::Async::Schema - Non-blocking, worker-pool based Proxy for DBIx::Cla
 
 =head1 VERSION
 
-Version 0.50
+Version 0.51
 
 =head1 SYNOPSIS
 

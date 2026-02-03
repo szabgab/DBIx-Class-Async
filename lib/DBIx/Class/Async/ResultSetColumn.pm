@@ -1,5 +1,8 @@
 package DBIx::Class::Async::ResultSetColumn;
 
+$DBIx::Class::Async::ResultSetColumn::VERSION   = '0.51';
+$DBIx::Class::Async::ResultSetColumn::AUTHORITY = 'cpan:MANWAR';
+
 use strict;
 use warnings;
 
@@ -9,7 +12,7 @@ DBIx::Class::Async::ResultSetColumn - Asynchronous operations on a single Result
 
 =head1 VERSION
 
-Version 0.50
+Version 0.51
 
 =head1 SYNOPSIS
 

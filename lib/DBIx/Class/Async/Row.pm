@@ -1,12 +1,15 @@
 package DBIx::Class::Async::Row;
 
+$DBIx::Class::Async::Row::VERSION   = '0.51';
+$DBIx::Class::Async::Row::AUTHORITY = 'cpan:MANWAR';
+
 =head1 NAME
 
 DBIx::Class::Async::Row - Asynchronous Row object representing a single database record.
 
 =head1 VERSION
 
-Version 0.50
+Version 0.51
 
 =head1 SYNOPSIS
 

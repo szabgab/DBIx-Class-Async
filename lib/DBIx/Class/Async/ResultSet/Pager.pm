@@ -1,5 +1,8 @@
 package DBIx::Class::Async::ResultSet::Pager;
 
+$DBIx::Class::Async::ResultSet::Pager::VERSION   = '0.51';
+$DBIx::Class::Async::ResultSet::Pager::AUTHORITY = 'cpan:MANWAR';
+
 use strict;
 use warnings;
 use Carp;
@@ -12,7 +15,7 @@ DBIx::Class::Async::ResultSet::Pager - Asynchronous pagination handling for Asyn
 
 =head1 VERSION
 
-Version 0.50
+Version 0.51
 
 =cut
 

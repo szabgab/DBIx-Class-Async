@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.50';
+$DBIx::Class::Async::VERSION   = '0.51';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =encoding utf8
@@ -11,7 +11,7 @@ DBIx::Class::Async - Non-blocking, multi-worker asynchronous wrapper for DBIx::C
 
 =head1 VERSION
 
-Version 0.50
+Version 0.51
 
 =head1 DISCLAIMER
 

@@ -1,5 +1,8 @@
 Revision history for DBIx::Class::Async
 
+0.51 2026-02-03
+     - Bumped version as PAUSE was unhappy with previous tar ball.
+
 0.50 2026-02-03
      [MAJOR ARCHITECTURAL OVERHAUL]
      - Complete rewrite of the Storage and Persistence layer to use a
