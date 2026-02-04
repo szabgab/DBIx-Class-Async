@@ -1,6 +1,6 @@
 package DBIx::Class::Async;
 
-$DBIx::Class::Async::VERSION   = '0.51';
+$DBIx::Class::Async::VERSION   = '0.52';
 $DBIx::Class::Async::AUTHORITY = 'cpan:MANWAR';
 
 =encoding utf8
@@ -11,7 +11,7 @@ DBIx::Class::Async - Non-blocking, multi-worker asynchronous wrapper for DBIx::C
 
 =head1 VERSION
 
-Version 0.51
+Version 0.52
 
 =head1 DISCLAIMER
 
@@ -473,6 +473,29 @@ sub _init_workers {
                         warn "[PID $$] Schema connection returned undef!"
                             if ASYNC_TRACE;
                         die "Schema connection returned undef";
+                    }
+
+                    # https://github.com/manwar/DBIx-Class-Async/issues/9
+                    #
+                    # When the worker process exits, Perl tries to clean up
+                    # the database handle. But the parent process also has a
+                    # reference to what it thinks is the same handle (it's
+                    # not, it's a fork). Without InactiveDestroy, both
+                    # processes try to close the connection, causing:
+                    #
+                    # 1) Parent closes connection
+                    # 2) Worker tries to close same connection -> SEGV
+                    #    (trying to free already-freed memory)
+                    #
+                    # InactiveDestroy = 1 tells DBI: "This handle was
+                    # inherited from a fork, don't close it when the child
+                    # exits"
+
+                    if ($schema->storage && $schema->storage->dbh) {
+                        $schema->storage->dbh->{InactiveDestroy} = 1;
+                        $schema->storage->dbh->{AutoInactiveDestroy} = 1;
+                        warn "[PID $$] Set InactiveDestroy on worker database handle"
+                            if ASYNC_TRACE;
                     }
 
                     warn "[PID $$] Database connected successfully"

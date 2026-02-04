@@ -1,5 +1,11 @@
 Revision history for DBIx::Class::Async
 
+0.52 2026-02-04
+     - Proposed patch for issue #4 (-Duselongdouble), thanks @eserte.
+     - Proposed patch for issue #9 (seg fault), thanks @eserte.
+     - Proposed patch for issue #7 (missing prereq). thanks @szabgab.
+     - Merged pull request #8 (add more versions of Perl to CI), thanks @szabgab.
+
 0.51 2026-02-03
      - Bumped version as PAUSE was unhappy with previous tar ball.
 
